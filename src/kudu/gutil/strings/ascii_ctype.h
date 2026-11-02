@@ -5,7 +5,7 @@
 // of some <ctype.h> functions.  These ascii_* functions are
 // hard-wired for ASCII.  Hard-wired for ASCII is much faster.
 //
-// asciiIsAlnum, asciiIsAscii, asciiIsDigit, asciiIsLower,
+// asciiIsAlnum, asciiIsDigit, asciiIsLower,
 // asciiIsPrint, asciiIsSpace, asciiIsXdigit
 //   Similar to the <ctype.h> functions with similar names.
 //   Input parameter is an unsigned char.  Return value is a bool.
@@ -53,9 +53,6 @@ static inline bool asciiIsLower(unsigned char c) {
   return c >= 'a' && c <= 'z';
 }
 
-static inline bool asciiIsAscii(unsigned char c) {
-  return c < 128;
-}
 #undef kApb
 
 extern const unsigned char kAsciiToLower[256];
