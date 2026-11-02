@@ -591,7 +591,7 @@ void ServerBase::unregisterAllServices() {
   messenger_->UnregisterAllServices();
 }
 
-void ServerBase::serviceQueueOverflowed(rpc::ServicePool* service) {
+void ServerBase::serviceQueueOverflowed(rpc::ServicePool* /* service */) {
   if (!diagLog_) {
     return;
   }
