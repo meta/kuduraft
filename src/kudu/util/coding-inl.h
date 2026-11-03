@@ -32,34 +32,6 @@
 
 namespace kudu {
 
-inline uint8_t* inlineEncodeVarint32(uint8_t* dst, uint32_t v) {
-  // Operate on characters as unsigneds
-  uint8_t* ptr = dst;
-  static const int kB = 128;
-  if (v < (1 << 7)) {
-    *(ptr++) = v;
-  } else if (v < (1 << 14)) {
-    *(ptr++) = v | kB;
-    *(ptr++) = v >> 7;
-  } else if (v < (1 << 21)) {
-    *(ptr++) = v | kB;
-    *(ptr++) = (v >> 7) | kB;
-    *(ptr++) = v >> 14;
-  } else if (v < (1 << 28)) {
-    *(ptr++) = v | kB;
-    *(ptr++) = (v >> 7) | kB;
-    *(ptr++) = (v >> 14) | kB;
-    *(ptr++) = v >> 21;
-  } else {
-    *(ptr++) = v | kB;
-    *(ptr++) = (v >> 7) | kB;
-    *(ptr++) = (v >> 14) | kB;
-    *(ptr++) = (v >> 21) | kB;
-    *(ptr++) = v >> 28;
-  }
-  return ptr;
-}
-
 inline void inlineEncodeFixed32(uint8_t* buf, uint32_t value) {
 #if __BYTE_ORDER == __LITTLE_ENDIAN
   memcpy(buf, &value, sizeof(value));
@@ -71,33 +43,11 @@ inline void inlineEncodeFixed32(uint8_t* buf, uint32_t value) {
 #endif
 }
 
-inline void inlineEncodeFixed64(uint8_t* buf, uint64_t value) {
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-  memcpy(buf, &value, sizeof(value));
-#else
-  buf[0] = value & 0xff;
-  buf[1] = (value >> 8) & 0xff;
-  buf[2] = (value >> 16) & 0xff;
-  buf[3] = (value >> 24) & 0xff;
-  buf[4] = (value >> 32) & 0xff;
-  buf[5] = (value >> 40) & 0xff;
-  buf[6] = (value >> 48) & 0xff;
-  buf[7] = (value >> 56) & 0xff;
-#endif
-}
-
 // Standard Put... routines append to a string
 template <class StrType>
 inline void inlinePutFixed32(StrType* dst, uint32_t value) {
   uint8_t buf[sizeof(value)];
   inlineEncodeFixed32(buf, value);
-  dst->append(buf, sizeof(buf));
-}
-
-template <class StrType>
-inline void inlinePutFixed64(StrType* dst, uint64_t value) {
-  uint8_t buf[sizeof(value)];
-  inlineEncodeFixed64(buf, value);
   dst->append(buf, sizeof(buf));
 }
 
