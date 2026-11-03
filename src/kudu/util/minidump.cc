@@ -28,7 +28,6 @@
 #include <glog/logging.h>
 
 #include "kudu/gutil/macros.h"
-#include "kudu/gutil/strings/human_readable.h"
 #include "kudu/util/env.h"
 #include "kudu/util/env_util.h"
 #include "kudu/util/errno.h"

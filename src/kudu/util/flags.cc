@@ -37,7 +37,6 @@
 
 #include <fmt/format.h>
 #include "kudu/gutil/macros.h"
-#include "kudu/gutil/map-util.h"
 #include "kudu/gutil/strings/join.h"
 #include "kudu/gutil/strings/numbers.h"
 #include "kudu/gutil/strings/split.h"

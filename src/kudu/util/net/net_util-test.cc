@@ -25,7 +25,6 @@
 #include <gtest/gtest.h>
 
 #include "kudu/gutil/strings/join.h"
-#include "kudu/gutil/strings/util.h"
 #include "kudu/util/net/net_util.h"
 #include "kudu/util/net/sockaddr.h"
 #include "kudu/util/net/socket.h"
