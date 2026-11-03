@@ -18,11 +18,8 @@
 #include "kudu/util/net/sockaddr.h"
 
 #include <arpa/inet.h>
-#include <netdb.h>
 #include <netinet/in.h>
-#include <sys/socket.h>
 
-#include <cerrno>
 #include <cstring>
 #include <string>
 
@@ -30,9 +27,7 @@
 #include "kudu/gutil/endian.h"
 #include "kudu/gutil/hash/builtin_type_hash.h"
 #include "kudu/gutil/hash/hash128to64.h"
-#include "kudu/gutil/port.h"
 #include "kudu/util/net/net_util.h"
-#include "kudu/util/stopwatch.h"
 
 using std::string;
 
@@ -123,37 +118,6 @@ bool Sockaddr::IsWildcard() const {
 
 bool Sockaddr::IsAnyLocalAddress() const {
   return (NetworkByteOrder::load128(addr_.sin6_addr.s6_addr) == 1);
-}
-
-Status Sockaddr::LookupHostname(string* hostname) const {
-  char host[NI_MAXHOST];
-  int flags = 0;
-
-  int rc;
-  LOG_SLOW_EXECUTION(
-      WARNING, 200, fmt::format("DNS reverse-lookup for {}", ToString())) {
-    rc = getnameinfo(
-        const_cast<struct sockaddr*>(
-            reinterpret_cast<const struct sockaddr*>(&addr_)),
-        sizeof(sockaddr_in6),
-        host,
-        NI_MAXHOST,
-        nullptr,
-        0,
-        flags);
-  }
-  if (PREDICT_FALSE(rc != 0)) {
-    if (rc == EAI_SYSTEM) {
-      int errno_saved = errno;
-      return Status::NetworkError(
-          fmt::format("getnameinfo: {}", gai_strerror(rc)),
-          strerror(errno_saved),
-          errno_saved);
-    }
-    return Status::NetworkError("getnameinfo", gai_strerror(rc), rc);
-  }
-  *hostname = host;
-  return Status::OK();
 }
 
 } // namespace kudu

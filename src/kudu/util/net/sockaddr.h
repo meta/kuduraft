@@ -71,9 +71,6 @@ class Sockaddr {
   // Returns true if the address is 127.*.*.*
   bool IsAnyLocalAddress() const;
 
-  // Does reverse DNS lookup of the address and stores it in hostname.
-  Status LookupHostname(std::string* hostname) const;
-
   // the default auto-generated copy constructor is fine here
  private:
   struct sockaddr_in6 addr_;
