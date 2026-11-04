@@ -84,6 +84,37 @@ DEFINE_int32(
     "The maximum per-tablet RPC batch size when updating peers.");
 TAG_FLAG(consensus_max_batch_size_bytes, advanced);
 
+DEFINE_bool(
+    raft_throttle_gossip,
+    true,
+    "Whether the leader piggybacks its write-throttling picture (aggregate "
+    "replica lag plus the entities it is throttling) onto outgoing "
+    "AppendEntries requests, so that whichever follower is promoted next "
+    "already knows the ring is lagging instead of rediscovering it. Runtime "
+    "toggleable via rpl_raft_throttle_gossip; turning it off stops the leader "
+    "sending, and followers age out what they cached.");
+TAG_FLAG(raft_throttle_gossip, advanced);
+TAG_FLAG(raft_throttle_gossip, runtime);
+
+DEFINE_int32(
+    raft_throttle_gossip_interval_secs,
+    10,
+    "Minimum seconds between throttle-state sends to any one peer. This rides "
+    "the hottest message in the system, so it is a floor, not a period: "
+    "nothing is sent at all while the picture is unchanged and empty. Worst "
+    "case propagation delay for a change is this many seconds.");
+TAG_FLAG(raft_throttle_gossip_interval_secs, advanced);
+TAG_FLAG(raft_throttle_gossip_interval_secs, runtime);
+
+DEFINE_int32(
+    raft_throttle_gossip_max_entities,
+    4,
+    "Cap on throttled entities per gossip message. Bounds the size of a field "
+    "on the AppendEntries path; entities are ordered most culpable first, so "
+    "truncation drops the least interesting ones.");
+TAG_FLAG(raft_throttle_gossip_max_entities, advanced);
+TAG_FLAG(raft_throttle_gossip_max_entities, runtime);
+
 DEFINE_int32(
     follower_unavailable_considered_failed_sec,
     300,
@@ -1506,6 +1537,7 @@ Status PeerMessageQueue::RequestForPeer(
     request->set_last_idx_appended_to_leader(queueState_.last_appended.index());
     request->set_caller_term(currentTerm);
     request->set_region_durable_index(queueState_.region_durable_index);
+    maybeStampThrottleStateUnlocked(peer, request);
     if (auto rpc_token = persistentVars_->raftRpcToken()) {
       request->set_raft_rpc_token(*rpc_token);
     }
@@ -2639,6 +2671,14 @@ bool PeerMessageQueue::DoResponseFromPeer(
     // offset between the local leader and the remote peer.
     UpdateExchangeStatus(
         peer, prev_last_exchange_status, response, &sendMoreImmediately);
+
+    if (peer->inFlightThrottleVersion.has_value()) {
+      if (PeerStatusConfirmsLeadership(peer->lastExchangeStatus)) {
+        peer->acknowledgedThrottleVersion =
+            peer->inFlightThrottleVersion.value();
+      }
+      peer->inFlightThrottleVersion.reset();
+    }
 
     // Leadership confirmation for linearizable reads.
     //
@@ -3777,6 +3817,83 @@ Status PeerMessageQueue::GetQuorumHealth(QuorumHealth* health) const {
     return GetQuorumHealthForFlexiRaftUnlocked(health);
   }
   return GetQuorumHealthForVanillaRaftUnlocked(health);
+}
+
+void PeerMessageQueue::setThrottleState(
+    ThrottleStatePB state,
+    MonoDelta validFor) {
+  // Recorded before truncation. Whether anything is being throttled is a
+  // property of the picture, not of how many entities this node was
+  // configured to put on the wire, and with the cap at 0 an actively
+  // throttling picture truncates to empty.
+  const bool active = state.entities_size() > 0;
+
+  const int32_t maxEntities = FLAGS_raft_throttle_gossip_max_entities;
+  while (state.entities_size() > std::max(0, maxEntities)) {
+    state.mutable_entities()->RemoveLast();
+  }
+
+  std::lock_guard<simple_mutexlock> lock(queueLock_);
+  // Refreshed even when the content is unchanged: a republish of the same
+  // picture is what vouches that it still holds.
+  throttleStateExpiresAt_ = MonoTime::Now() + validFor;
+  // Only advance the version when the picture actually changed, so that an
+  // unchanged state - overwhelmingly the common case - costs nothing to keep
+  // peers in sync with. Cheap: this runs once per throttle cycle on a message
+  // bounded to a handful of small entities.
+  if (throttleState_ &&
+      throttleState_->SerializeAsString() == state.SerializeAsString()) {
+    return;
+  }
+  throttleState_ = std::move(state);
+  throttleStateActive_ = active;
+  ++throttleStateVersion_;
+}
+
+void PeerMessageQueue::maybeStampThrottleStateUnlocked(
+    TrackedPeer* peer,
+    ConsensusRequestPB* request) {
+  // Requests are reused across calls for the same peer, so a field left set
+  // would ride every subsequent heartbeat and defeat the rate limiting.
+  request->clear_throttle_state();
+  // UpdateConsensus is single-flight per peer. Starting a new request means
+  // any unacknowledged version belonged to a failed request and must not be
+  // credited when this request's response arrives.
+  peer->inFlightThrottleVersion.reset();
+
+  if (!FLAGS_raft_throttle_gossip || !throttleState_) {
+    return;
+  }
+
+  const MonoTime now = MonoTime::Now();
+  // The publisher has stopped vouching for this picture. Every resend
+  // refreshes the follower's receive time, so without this an abandoned
+  // picture would be kept fresh on followers indefinitely and their staleness
+  // bound would never fire.
+  if (now > throttleStateExpiresAt_) {
+    return;
+  }
+
+  const bool peerIsCurrent =
+      peer->acknowledgedThrottleVersion == throttleStateVersion_;
+  // Keep re-sending an active picture so that a dropped request does not leave
+  // a peer blind for as long as the throttling lasts. Once nothing is being
+  // throttled and the peer knows it, go quiet: this rides the hottest message
+  // in the system and the steady state is "nothing is throttled".
+  if (peerIsCurrent && !throttleStateActive_) {
+    return;
+  }
+
+  const MonoDelta minInterval =
+      MonoDelta::FromSeconds(FLAGS_raft_throttle_gossip_interval_secs);
+  if (peer->lastThrottleSendTime.Initialized() &&
+      now - peer->lastThrottleSendTime < minInterval) {
+    return;
+  }
+
+  *request->mutable_throttle_state() = *throttleState_;
+  peer->lastThrottleSendTime = now;
+  peer->inFlightThrottleVersion = throttleStateVersion_;
 }
 
 Status PeerMessageQueue::getAllStateMachineMetrics(

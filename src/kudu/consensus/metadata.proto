@@ -399,3 +399,41 @@ message StateMachineMetricsPB {
   optional uint64 worker_exec_ns = 15;
   optional uint64 worker_idle_ns = 16;
 }
+
+// One entity the leader is currently write-throttling.
+message ThrottledEntityPB {
+  // enum_wtr_dimension on the MySQL side (USER / CLIENT / SHARD / SQL_ID).
+  optional uint32 dimension = 1;
+  // Entity name. Senders must cap the length; see ThrottleStatePB.
+  optional bytes value = 2;
+  // Throttle rate in [0, 100].
+  optional uint32 throttle_rate = 3;
+}
+
+// The leader's view of replication lag and who is responsible for it, pushed
+// down to followers so that whichever one is promoted next does not have to
+// rediscover it from scratch. A promoted replica otherwise starts with no lag
+// history at all and reads as perfectly caught up at exactly the moment it is
+// most likely to be behind.
+//
+// Only what the throttling decision consumes belongs here. Notably absent is
+// StateMachineMetricsPB::write_stats_serialized_thrift: replicas already ship
+// that up to the leader, it is large, and the decision does not need it.
+//
+// This rides ConsensusRequestPB, the hottest message in the system, so the
+// leader must leave it unset whenever nothing is throttled and lag is below
+// the start threshold - which is the overwhelmingly common case. Senders must
+// also bound both the entity count and each value's length, otherwise the
+// message has no size bound at all.
+message ThrottleStatePB {
+  // Aggregate replica lag the leader computed, to be compared against
+  // write_start/stop_throttle_lag_milliseconds.
+  optional int64 lag_milliseconds = 1;
+  // Denominator and numerator for the
+  // write_throttle_lag_pct_min_secondaries test.
+  optional uint32 voter_count = 2;
+  optional uint32 lagging_voter_count = 3;
+  // Currently active AUTO rules, most culpable first, truncated to a bounded
+  // number of entries.
+  repeated ThrottledEntityPB entities = 4;
+}

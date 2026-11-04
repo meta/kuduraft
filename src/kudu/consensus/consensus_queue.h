@@ -292,6 +292,15 @@ class PeerMessageQueue {
     // Active warnings from the peer's latest valid response.
     ServerWarnings lastServerWarnings;
 
+    // Throttle-state gossip bookkeeping. acknowledgedThrottleVersion starts
+    // before any real version so that a newly tracked peer - including one
+    // that just came back and lost whatever it had cached - is brought up to
+    // date on the first eligible request. inFlightThrottleVersion is promoted
+    // to acknowledged only after the follower accepts the leader's term.
+    MonoTime lastThrottleSendTime;
+    int64_t acknowledgedThrottleVersion = -1;
+    std::optional<int64_t> inFlightThrottleVersion;
+
    private:
     // The last term we saw from a given peer.
     // This is only used for sanity checking that a peer doesn't
@@ -793,6 +802,19 @@ class PeerMessageQueue {
   // If leader, return server health for all peers
   Status getAllStateMachineMetrics(AllStateMachineMetrics* health);
 
+  // Publish the write-throttling picture to gossip to followers. Called once
+  // per throttle cycle from the MySQL side, not per request. Entities are
+  // expected most culpable first; the queue truncates them.
+  //
+  // Pass a state with no entities and lag below the threshold to say "nothing
+  // is throttled" - that is a real update which followers need in order to
+  // clear what they cached, and is distinct from never having published.
+  //
+  // validFor is how long the publisher vouches for this picture. Once it
+  // lapses without another publish the picture stops being sent, so a
+  // publisher that goes quiet cannot keep followers' copies artificially fresh.
+  void setThrottleState(ThrottleStatePB state, MonoDelta validFor);
+
   // Gets the Leader Lease timestamp
   MonoTime getLeaderLeaseUntil();
 
@@ -1248,6 +1270,23 @@ class PeerMessageQueue {
   PeersMap peersMap_;
 
   mutable simple_mutexlock queueLock_; // TODO(todd): rename
+
+  // Latest throttle picture published by the MySQL side, and a version that
+  // only advances when the content actually changes. Peers carry the version
+  // they last received, so an unchanged picture costs nothing to keep in sync.
+  // Guarded by queueLock_.
+  std::optional<ThrottleStatePB> throttleState_;
+  // Whether the published picture named anything, recorded before the entity
+  // cap is applied so that a cap of 0 does not read as "nothing throttled".
+  bool throttleStateActive_ = false;
+  int64_t throttleStateVersion_ = 0;
+  MonoTime throttleStateExpiresAt_;
+
+  // Stamps throttleState_ into an outgoing request if this peer is due one.
+  // Caller must hold queueLock_.
+  void maybeStampThrottleStateUnlocked(
+      TrackedPeer* peer,
+      ConsensusRequestPB* request);
 
   bool successorWatchInProgress_;
   std::optional<std::string> designatedSuccessorUuid_;

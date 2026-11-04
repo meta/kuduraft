@@ -623,6 +623,15 @@ message ConsensusRequestPB {
 
   // Leader requesting the lease duration for Followers to ACK on
   optional int32 requested_lease_duration = 18;
+
+  // The leader's write-throttling picture, so a follower that gets promoted
+  // already knows whether the ring is lagging and who is responsible.
+  //
+  // Rate limited: sent at most once every
+  // --raft_throttle_gossip_interval_secs per peer, and left unset entirely
+  // while nothing is throttled. Do not assume it is present on any given
+  // request; followers cache the last one they saw.
+  optional ThrottleStatePB throttle_state = 19;
 }
 
 // Describes a condition that projects future unavailability of the responding

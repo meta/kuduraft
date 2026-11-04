@@ -133,6 +133,19 @@ struct TabletVotingState {
       : tombstoneLastLoggedOpId(std::move(tombstoneLastLoggedOpIdArg)) {}
 };
 
+// A throttle picture is trusted only when the follower accepted the sender's
+// term. Log-matching failures still qualify because term validation precedes
+// the log-matching check.
+[[nodiscard]] bool shouldCacheThrottleState(
+    const ConsensusRequestPB& request,
+    const ConsensusResponsePB& response,
+    const Status& updateStatus);
+
+// Copies the fields that retain their meaning across one proxy hop.
+void copyProxyRequestFields(
+    const ConsensusRequestPB& source,
+    ConsensusRequestPB& destination);
+
 using ConsensusReplicatedCallback = StdStatusCallback;
 
 // Reasons for StartElection().
@@ -863,6 +876,19 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
   Status getAllStateMachineMetrics(
       PeerMessageQueue::AllStateMachineMetrics* metrics);
 
+  // Publish this node's throttle picture for gossip to followers. No-op unless
+  // this node is the leader, since only a leader builds outgoing requests.
+  // See PeerMessageQueue::setThrottleState for validFor.
+  void setThrottleState(ThrottleStatePB state, MonoDelta validFor);
+
+  // The last throttle picture gossiped down by the leader, or nullopt if none
+  // arrived within maxAge. Read on promotion: the value describes the ring as
+  // of the last heartbeat this node received, so after a leader dies it only
+  // gets staler, never refreshed. Callers must pass a bound they are willing
+  // to act on rather than trusting it indefinitely.
+  std::optional<ThrottleStatePB> getGossipedThrottleState(
+      MonoDelta maxAge) const;
+
   // Everything the status-variable layer needs, read without
   // consensusStateLock_.
   //
@@ -1588,6 +1614,13 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
   // queue_, for getStatusSnapshot(), which does not take consensusStateLock_.
   // Set once in Start(); null before that.
   std::atomic<PeerMessageQueue*> statusQueue_{nullptr};
+
+  // Guards the gossiped throttle state below. Deliberately a leaf: nothing is
+  // acquired while it is held, so the reader (the MySQL side, on promotion)
+  // never participates in the updateLock_/lock_ ordering above.
+  mutable simple_mutexlock throttleStateLock_;
+  std::optional<ThrottleStatePB> throttleState_;
+  MonoTime throttleStateReceivedAt_;
 
   State state_;
 

@@ -68,6 +68,11 @@
 #include "kudu/util/threadpool-test-util.h" // @manual - duplicate header owner
 
 DECLARE_int32(consensus_max_batch_size_bytes);
+// NOLINTBEGIN(facebook-hte-PreventUseOfDeclareGflag)
+DECLARE_bool(raft_throttle_gossip);
+DECLARE_int32(raft_throttle_gossip_interval_secs);
+DECLARE_int32(raft_throttle_gossip_max_entities);
+// NOLINTEND(facebook-hte-PreventUseOfDeclareGflag)
 
 using kudu::consensus::HealthReportPB;
 using std::atomic;
@@ -3824,6 +3829,235 @@ TEST_F(ConsensusQueueBoundedDatalossTest, TestTickIsSingleFlight) {
 
   EXPECT_EQ(scans, 1);
   EXPECT_TRUE(evidence("peer-1").confirmedWatermark.has_value());
+}
+
+// Throttle-state gossip.
+//
+// These drive the send decision rather than the wall clock: an interval of 0
+// makes every request eligible and a large one makes none eligible, so the
+// rate limiting is covered without sleeping.
+
+namespace {
+
+ThrottleStatePB makeThrottleState(
+    int64_t lagMs,
+    const vector<string>& entityValues) {
+  ThrottleStatePB state;
+  state.set_lag_milliseconds(lagMs);
+  for (const auto& value : entityValues) {
+    auto* entity = state.add_entities();
+    entity->set_dimension(0);
+    entity->set_value(value);
+    entity->set_throttle_rate(50);
+  }
+  return state;
+}
+
+vector<string> entityValuesOf(const ThrottleStatePB& state) {
+  vector<string> values;
+  for (const auto& entity : state.entities()) {
+    values.push_back(entity.value());
+  }
+  return values;
+}
+
+} // anonymous namespace
+
+class ConsensusQueueThrottleGossipTest : public ConsensusQueueTest {
+ protected:
+  void SetUp() override {
+    ConsensusQueueTest::SetUp();
+    queue_->setLeaderMode(
+        kMinimumOpIdIndex, kMinimumTerm, buildRaftConfigPbForTests(2));
+    queue_->trackPeer(makePeer(kPeerUuid, RaftPeerPB::VOTER));
+    FLAGS_raft_throttle_gossip = true;
+    FLAGS_raft_throttle_gossip_interval_secs = 0;
+  }
+
+  // Builds one request for kPeerUuid, as the leader would when heartbeating.
+  // The same request object is reused across calls on purpose: that is what
+  // the real caller does, and it is how a field left set would leak onto
+  // subsequent heartbeats.
+  void buildRequest() {
+    vector<ReplicateRefPtr> refs;
+    bool needsTabletCopy = false;
+    std::string nextHopUuid;
+    ASSERT_OK(queue_->RequestForPeer(
+        kPeerUuid,
+        /*read_ops=*/false,
+        &request_,
+        &refs,
+        &needsTabletCopy,
+        &nextHopUuid));
+  }
+
+  // Long enough that no test outlives it unless it asks to.
+  void publish(
+      ThrottleStatePB state,
+      MonoDelta validFor = MonoDelta::FromSeconds(3600)) {
+    queue_->setThrottleState(std::move(state), validFor);
+  }
+
+  void acknowledgeRequest() {
+    ConsensusResponsePB response;
+    response.set_responder_uuid(kPeerUuid);
+    response.set_responder_term(kMinimumTerm);
+    setLastReceivedAndLastCommitted(&response, MinimumOpId());
+    EXPECT_FALSE(queue_->ResponseFromPeer(kPeerUuid, response));
+    waitForPool(*raftPool_);
+  }
+
+  gflags::FlagSaver saver_;
+  ConsensusRequestPB request_;
+};
+
+TEST_F(ConsensusQueueThrottleGossipTest, GossipDisabled_StampsNothing) {
+  FLAGS_raft_throttle_gossip = false;
+  publish(makeThrottleState(5000, {"heavy-writer"}));
+
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+
+  EXPECT_FALSE(request_.has_throttle_state());
+}
+
+TEST_F(ConsensusQueueThrottleGossipTest, NothingPublished_StampsNothing) {
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+
+  EXPECT_FALSE(request_.has_throttle_state());
+}
+
+TEST_F(ConsensusQueueThrottleGossipTest, PublishedPicture_ReachesThePeer) {
+  publish(makeThrottleState(5000, {"heavy-writer"}));
+
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+
+  ASSERT_TRUE(request_.has_throttle_state());
+  EXPECT_EQ(5000, request_.throttle_state().lag_milliseconds());
+  const vector<string> expected{"heavy-writer"};
+  EXPECT_EQ(expected, entityValuesOf(request_.throttle_state()));
+}
+
+TEST_F(ConsensusQueueThrottleGossipTest, WithinInterval_IsNotResent) {
+  FLAGS_raft_throttle_gossip_interval_secs = 3600;
+  publish(makeThrottleState(5000, {"heavy-writer"}));
+
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+  ASSERT_TRUE(request_.has_throttle_state());
+
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+
+  EXPECT_FALSE(request_.has_throttle_state())
+      << "the interval is a floor on sends to one peer, and a reused request "
+         "must not carry the previous stamp";
+}
+
+TEST_F(ConsensusQueueThrottleGossipTest, ActivePicture_KeepsBeingResent) {
+  publish(makeThrottleState(5000, {"heavy-writer"}));
+
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+  ASSERT_TRUE(request_.has_throttle_state());
+
+  // Unchanged, but still throttling: resent so that a peer which missed the
+  // first one does not stay blind for as long as the throttling lasts.
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+
+  EXPECT_TRUE(request_.has_throttle_state());
+}
+
+TEST_F(ConsensusQueueThrottleGossipTest, DeliveredEmptyPicture_GoesQuiet) {
+  publish(makeThrottleState(5000, {"heavy-writer"}));
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+  ASSERT_TRUE(request_.has_throttle_state());
+
+  // Throttling stopped. The peer needs to be told once, so that it clears what
+  // it cached rather than acting on a picture that no longer holds.
+  publish(makeThrottleState(0, {}));
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+  ASSERT_TRUE(request_.has_throttle_state());
+  EXPECT_TRUE(request_.throttle_state().entities().empty());
+  ASSERT_NO_FATAL_FAILURE(acknowledgeRequest());
+
+  // Having been told, the steady state costs nothing on the heartbeat path.
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+
+  EXPECT_FALSE(request_.has_throttle_state());
+}
+
+TEST_F(ConsensusQueueThrottleGossipTest, DroppedEmptyPicture_IsRetried) {
+  publish(makeThrottleState(0, {}));
+
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+  ASSERT_TRUE(request_.has_throttle_state());
+
+  // No response arrived, so the peer has not proved that it cleared its old
+  // picture. The next eligible request must carry the empty state again.
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+
+  EXPECT_TRUE(request_.has_throttle_state());
+  EXPECT_TRUE(request_.throttle_state().entities().empty());
+}
+
+TEST_F(ConsensusQueueThrottleGossipTest, MoreEntitiesThanCap_KeepsMostCulprit) {
+  FLAGS_raft_throttle_gossip_max_entities = 2;
+  publish(makeThrottleState(5000, {"worst", "second", "third", "fourth"}));
+
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+
+  ASSERT_TRUE(request_.has_throttle_state());
+  const vector<string> expected{"worst", "second"};
+  EXPECT_EQ(expected, entityValuesOf(request_.throttle_state()));
+}
+
+TEST_F(ConsensusQueueThrottleGossipTest, ZeroCap_StillResendsWhileThrottling) {
+  // The cap truncates the entity list away, but something IS being throttled,
+  // so the reliability resend has to keep going. Deciding that from the
+  // truncated list would read as "nothing throttled" and silently go quiet.
+  FLAGS_raft_throttle_gossip_max_entities = 0;
+  publish(makeThrottleState(5000, {"heavy-writer"}));
+
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+  ASSERT_TRUE(request_.has_throttle_state());
+
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+
+  EXPECT_TRUE(request_.has_throttle_state());
+}
+
+TEST_F(ConsensusQueueThrottleGossipTest, ZeroCap_KeepsAggregateLagOnly) {
+  FLAGS_raft_throttle_gossip_max_entities = 0;
+  publish(makeThrottleState(5000, {"heavy-writer"}));
+
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+
+  ASSERT_TRUE(request_.has_throttle_state());
+  EXPECT_EQ(5000, request_.throttle_state().lag_milliseconds());
+  EXPECT_TRUE(request_.throttle_state().entities().empty());
+}
+
+TEST_F(ConsensusQueueThrottleGossipTest, AbandonedPicture_StopsBeingResent) {
+  // Already lapsed when published, standing in for a publisher that went
+  // quiet. Resending it would keep refreshing followers' copies, so their
+  // staleness bound could never fire.
+  publish(
+      makeThrottleState(5000, {"heavy-writer"}), MonoDelta::FromSeconds(-1));
+
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+
+  EXPECT_FALSE(request_.has_throttle_state());
+}
+
+TEST_F(ConsensusQueueThrottleGossipTest, UnchangedRepublish_RenewsThePicture) {
+  publish(
+      makeThrottleState(5000, {"heavy-writer"}), MonoDelta::FromSeconds(-1));
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+  ASSERT_FALSE(request_.has_throttle_state());
+
+  // Same content, so the version does not move, but the publisher is vouching
+  // for it again.
+  publish(makeThrottleState(5000, {"heavy-writer"}));
+  ASSERT_NO_FATAL_FAILURE(buildRequest());
+
+  EXPECT_TRUE(request_.has_throttle_state());
 }
 
 } // namespace consensus

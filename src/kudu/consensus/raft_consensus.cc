@@ -1819,6 +1819,20 @@ Status RaftConsensus::update(
   // see var declaration
   std::lock_guard<simple_mutexlock> lock(updateLock_);
   Status s = updateReplica(request, response);
+  // Cached only once the append is accepted, so that a leader whose term we
+  // just rejected cannot seed this node's picture of who to throttle.
+  //
+  // Deliberately NOT cleared when a newer-term leader's requests arrive
+  // without a picture. A newer leader replaces it as soon as it publishes,
+  // including "nothing throttled", and the consumer's max age bounds how old
+  // it can be. Under leadership churn the intermediate leader often dies
+  // before running a single throttle cycle; clearing on the term change would
+  // discard the only real picture exactly when the next promotee needs it.
+  if (shouldCacheThrottleState(*request, *response, s)) {
+    std::lock_guard<simple_mutexlock> throttleLock(throttleStateLock_);
+    throttleState_ = request->throttle_state();
+    throttleStateReceivedAt_ = MonoTime::Now();
+  }
   if (PREDICT_FALSE(VLOG_IS_ON(1))) {
     if (request->ops().empty()) {
       VLOG_WITH_PREFIX(1) << "Replica replied to status only request. Replica: "
@@ -1827,6 +1841,17 @@ Status RaftConsensus::update(
     }
   }
   return s;
+}
+
+bool shouldCacheThrottleState(
+    const ConsensusRequestPB& request,
+    const ConsensusResponsePB& response,
+    const Status& updateStatus) {
+  if (!updateStatus.ok() || !request.has_throttle_state()) {
+    return false;
+  }
+  return !response.has_status() || !response.status().has_error() ||
+      response.status().error().code() != ConsensusErrorPB::INVALID_TERM;
 }
 
 // Helper function to check if the op is a non-Transaction op.
@@ -5342,6 +5367,45 @@ static void SetupErrorAndRespond(
     }                                                           \
   } while (0)
 
+void copyProxyRequestFields(
+    const ConsensusRequestPB& source,
+    ConsensusRequestPB& destination) {
+  destination.set_dest_uuid(source.dest_uuid());
+  destination.set_tablet_id(source.tablet_id());
+  destination.set_caller_uuid(source.caller_uuid());
+  destination.set_caller_term(source.caller_term());
+  destination.set_proxy_hops_remaining(source.proxy_hops_remaining() - 1);
+
+  if (source.has_preceding_id()) {
+    *destination.mutable_preceding_id() = source.preceding_id();
+  }
+  if (source.has_committed_index()) {
+    destination.set_committed_index(source.committed_index());
+  }
+  if (source.has_all_replicated_index()) {
+    destination.set_all_replicated_index(source.all_replicated_index());
+  }
+  if (source.has_safe_timestamp()) {
+    destination.set_safe_timestamp(source.safe_timestamp());
+  }
+  if (source.has_last_idx_appended_to_leader()) {
+    destination.set_last_idx_appended_to_leader(
+        source.last_idx_appended_to_leader());
+  }
+  if (source.has_region_durable_index()) {
+    destination.set_region_durable_index(source.region_durable_index());
+  }
+  if (source.has_raft_rpc_token()) {
+    destination.set_raft_rpc_token(source.raft_rpc_token());
+  }
+  if (source.has_compression_dictionary()) {
+    destination.set_compression_dictionary(source.compression_dictionary());
+  }
+  if (source.has_throttle_state()) {
+    *destination.mutable_throttle_state() = source.throttle_state();
+  }
+}
+
 void RaftConsensus::handleProxyRequest(
     const ConsensusRequestPB* request,
     ConsensusResponsePB* response,
@@ -5418,42 +5482,7 @@ void RaftConsensus::handleProxyRequest(
         /*elements=*/nullptr);
   });
 
-  downstream_request.set_dest_uuid(request->dest_uuid());
-  downstream_request.set_tablet_id(request->tablet_id());
-  downstream_request.set_caller_uuid(request->caller_uuid());
-  downstream_request.set_caller_term(request->caller_term());
-  // Decrement hops remaining.
-  downstream_request.set_proxy_hops_remaining(
-      request->proxy_hops_remaining() - 1);
-
-  if (request->has_preceding_id()) {
-    *downstream_request.mutable_preceding_id() = request->preceding_id();
-  }
-  if (request->has_committed_index()) {
-    downstream_request.set_committed_index(request->committed_index());
-  }
-  if (request->has_all_replicated_index()) {
-    downstream_request.set_all_replicated_index(
-        request->all_replicated_index());
-  }
-  if (request->has_safe_timestamp()) {
-    downstream_request.set_safe_timestamp(request->safe_timestamp());
-  }
-  if (request->has_last_idx_appended_to_leader()) {
-    downstream_request.set_last_idx_appended_to_leader(
-        request->last_idx_appended_to_leader());
-  }
-  if (request->has_region_durable_index()) {
-    downstream_request.set_region_durable_index(
-        request->region_durable_index());
-  }
-  if (request->has_raft_rpc_token()) {
-    downstream_request.set_raft_rpc_token(request->raft_rpc_token());
-  }
-  if (request->has_compression_dictionary()) {
-    downstream_request.set_compression_dictionary(
-        request->compression_dictionary());
-  }
+  copyProxyRequestFields(*request, downstream_request);
 
   downstream_request.set_proxy_caller_uuid(peer_uuid());
 
@@ -6111,6 +6140,27 @@ Status RaftConsensus::getAllStateMachineMetrics(
     return Status::IllegalState("Consensus queue not started");
   }
   return queue->getAllStateMachineMetrics(metrics);
+}
+
+void RaftConsensus::setThrottleState(
+    ThrottleStatePB state,
+    MonoDelta validFor) {
+  LockGuard l(consensusStateLock_);
+  if (queue_) {
+    queue_->setThrottleState(std::move(state), validFor);
+  }
+}
+
+std::optional<ThrottleStatePB> RaftConsensus::getGossipedThrottleState(
+    MonoDelta maxAge) const {
+  std::lock_guard<simple_mutexlock> l(throttleStateLock_);
+  if (!throttleState_ || !throttleStateReceivedAt_.Initialized()) {
+    return std::nullopt;
+  }
+  if (MonoTime::Now() - throttleStateReceivedAt_ > maxAge) {
+    return std::nullopt;
+  }
+  return throttleState_;
 }
 
 bool RaftConsensus::isStateMachineHealthyForElection(
