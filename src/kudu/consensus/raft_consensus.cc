@@ -4156,6 +4156,11 @@ Status RaftConsensus::createReplicateMsgFromConfigsUnlocked(
 Status RaftConsensus::refreshConsensusQueueAndPeersUnlocked() {
   DCHECK(consensusStateLock_.is_locked());
   DCHECK_EQ(RaftPeerPB::LEADER, cmeta_->activeRole());
+  // Lock-free readers trust a queue sample only while the live cmeta
+  // generation equals the published one, so a rebuild must bump it first.
+  DCHECK(
+      !publishedStatusGenerations_ ||
+      cmeta_->consensusStateGeneration() != publishedStatusGenerations_->cmeta);
   const RaftConfigPB& active_config = cmeta_->activeConfig();
 
   // Change the peers so that we're able to replicate messages remotely and
@@ -6106,7 +6111,9 @@ void RaftConsensus::publishStatusIfChangedUnlocked() {
   if (publishedStatusGenerations_ == generations) {
     return;
   }
-  publishedStatus_.store(buildStatusSnapshotUnlocked());
+  auto snapshot = buildStatusSnapshotUnlocked();
+  snapshot->consensusStateGeneration = generations.cmeta;
+  publishedStatus_.store(std::move(snapshot));
   publishedStatusGenerations_ = generations;
 }
 

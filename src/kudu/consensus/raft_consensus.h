@@ -932,6 +932,11 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
 
     PeerMessageQueue::AllStateMachineMetrics allStateMachineMetrics;
     bool allStateMachineMetricsValid{false};
+
+    // cmeta_->consensusStateGeneration() when this was published. A lock-free
+    // reader that finds the live generation still equal saw no consensus change
+    // in progress.
+    int64_t consensusStateGeneration{0};
   };
 
   // Fills 'snapshot' without taking consensusStateLock_.
