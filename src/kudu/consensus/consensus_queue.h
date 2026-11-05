@@ -271,6 +271,10 @@ class PeerMessageQueue {
     // a configured limit.
     bool isHealthy() const;
 
+    // True until the first exchange with this peer completes (successfully or
+    // not). Such a peer reports unhealthy but has not failed a request yet.
+    bool neverContacted() const;
+
     int32_t consecutiveFailures() const;
     void incrConsecutiveFailures();
     void resetConsecutiveFailures();
