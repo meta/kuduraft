@@ -3149,6 +3149,23 @@ TEST_F(ConsensusQueueBoundedDatalossTest, TestPeerErrorsUpdateWatermarkSafely) {
   EXPECT_FALSE(queue_->admitProtectedWrite(1, 8).admitted);
 }
 
+// TABLET_FAILED returns from UpdatePeerStatus before the shared error handling.
+TEST_F(ConsensusQueueBoundedDatalossTest, TestTabletFailedClearsWatermark) {
+  FLAGS_dataloss_bound_mode = kDatalossBoundFailClosed;
+  setupLeader({makeDbVoter("peer-1", "b")});
+  establishWatermark("peer-1", opIdAt(kSetupOps));
+  ASSERT_TRUE(evidence("peer-1").confirmedWatermark.has_value());
+
+  queue_->UpdatePeerStatus(
+      "peer-1", PeerStatus::TabletFailed, Status::IOError("tablet failed"));
+
+  const auto peer = evidence("peer-1");
+  EXPECT_EQ(peer.confirmedPrefixIndex, 0);
+  EXPECT_FALSE(peer.confirmedWatermark.has_value());
+  EXPECT_FALSE(peer.pendingWatermark.has_value());
+  EXPECT_FALSE(queue_->admitProtectedWrite(1, 8).admitted);
+}
+
 TEST_F(
     ConsensusQueueBoundedDatalossTest,
     TestForgettingOnePeerKeepsAnotherAdmitting) {
