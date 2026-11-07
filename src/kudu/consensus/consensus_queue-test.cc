@@ -315,10 +315,11 @@ TEST_F(ConsensusQueueTest, TracksAndClearsTimestampedWarnings) {
   ConsensusResponsePB response;
   response.set_responder_uuid(kPeerUuid);
   setLastReceivedAndLastCommitted(&response, MinimumOpId());
-  auto* plsWarning = response.add_warnings();
+  auto* plsWarning = response.mutable_server_warnings()->add_warnings();
   plsWarning->set_code(ServerWarningPB::PLS_RECEIVED);
   plsWarning->set_start_time(1234);
-  response.add_warnings()->set_code(ServerWarningPB::UNKNOWN);
+  response.mutable_server_warnings()->add_warnings()->set_code(
+      ServerWarningPB::UNKNOWN);
   queue_->ResponseFromPeer(response.responder_uuid(), response);
 
   auto warnings = queue_->getTrackedPeerForTests(kPeerUuid).lastServerWarnings;
@@ -329,8 +330,8 @@ TEST_F(ConsensusQueueTest, TracksAndClearsTimestampedWarnings) {
   EXPECT_EQ(warnings[1].code(), ServerWarningPB::UNKNOWN);
   EXPECT_FALSE(warnings[1].has_start_time());
 
-  response.clear_warnings();
-  plsWarning = response.add_warnings();
+  response.mutable_server_warnings()->clear_warnings();
+  plsWarning = response.mutable_server_warnings()->add_warnings();
   plsWarning->set_code(ServerWarningPB::PLS_RECEIVED);
   plsWarning->set_start_time(5678);
   queue_->ResponseFromPeer(response.responder_uuid(), response);
@@ -341,7 +342,14 @@ TEST_F(ConsensusQueueTest, TracksAndClearsTimestampedWarnings) {
   ASSERT_TRUE(warnings[0].has_start_time());
   EXPECT_EQ(warnings[0].start_time(), 5678);
 
-  response.clear_warnings();
+  // A response without a snapshot preserves the prior warnings.
+  response.clear_server_warnings();
+  queue_->ResponseFromPeer(response.responder_uuid(), response);
+  EXPECT_EQ(
+      queue_->getTrackedPeerForTests(kPeerUuid).lastServerWarnings.size(), 1);
+
+  // A present empty snapshot clears them.
+  response.mutable_server_warnings();
   queue_->ResponseFromPeer(response.responder_uuid(), response);
   EXPECT_TRUE(
       queue_->getTrackedPeerForTests(kPeerUuid).lastServerWarnings.empty());
@@ -355,10 +363,11 @@ TEST_F(ConsensusQueueTest, ControllerErrorsPreserveTimestampedWarnings) {
   ConsensusResponsePB response;
   response.set_responder_uuid(kPeerUuid);
   setLastReceivedAndLastCommitted(&response, MinimumOpId());
-  auto* plsWarning = response.add_warnings();
+  auto* plsWarning = response.mutable_server_warnings()->add_warnings();
   plsWarning->set_code(ServerWarningPB::PLS_RECEIVED);
   plsWarning->set_start_time(1234);
-  response.add_warnings()->set_code(ServerWarningPB::UNKNOWN);
+  response.mutable_server_warnings()->add_warnings()->set_code(
+      ServerWarningPB::UNKNOWN);
   queue_->ResponseFromPeer(response.responder_uuid(), response);
 
   queue_->UpdatePeerStatus(
@@ -382,13 +391,13 @@ TEST_F(ConsensusQueueTest, MismatchedResponderDoesNotReplaceWarnings) {
   ConsensusResponsePB response;
   response.set_responder_uuid(kPeerUuid);
   setLastReceivedAndLastCommitted(&response, MinimumOpId());
-  auto* warning = response.add_warnings();
+  auto* warning = response.mutable_server_warnings()->add_warnings();
   warning->set_code(ServerWarningPB::PLS_RECEIVED);
   warning->set_start_time(1234);
   queue_->ResponseFromPeer(response.responder_uuid(), response);
 
   response.set_responder_uuid("peer-2");
-  response.mutable_warnings(0)->set_start_time(5678);
+  response.mutable_server_warnings()->mutable_warnings(0)->set_start_time(5678);
   queue_->ResponseFromPeer(kPeerUuid, response);
 
   const auto warnings =

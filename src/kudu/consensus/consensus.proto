@@ -652,6 +652,10 @@ message ServerWarningPB {
   optional int64 start_time = 2;
 }
 
+message ServerWarningsPB {
+  repeated ServerWarningPB warnings = 1;
+}
+
 message ConsensusResponsePB {
   // The uuid of the peer making the response.
   optional bytes responder_uuid = 1;
@@ -677,11 +681,15 @@ message ConsensusResponsePB {
 
   optional StateMachineMetricsPB state_machine_metrics = 7;
 
-  // Complete snapshot of active warnings from responder_uuid when it is
-  // nonempty and matches the request's ultimate dest_uuid. An authoritative
-  // empty snapshot clears prior warnings; otherwise callers preserve them.
-  // Warnings do not reject the consensus request.
-  repeated ServerWarningPB warnings = 8;
+  // Retired unwrapped warning list.
+  reserved 8;
+  reserved "warnings";
+
+  // Complete snapshot of active warnings from responder_uuid when present and
+  // responder_uuid matches the request's ultimate dest_uuid. A present empty
+  // snapshot clears prior warnings; otherwise callers preserve them. Warnings
+  // do not reject the consensus request.
+  optional ServerWarningsPB server_warnings = 9;
 
   // A generic error message (such as tablet not found), per operation
   // error messages are sent along with the consensus status.

@@ -160,6 +160,16 @@ const char* peerStatusToString(PeerStatus p);
 using ServerWarningPBs = google::protobuf::RepeatedPtrField<ServerWarningPB>;
 using ServerWarnings = std::vector<ServerWarningPB>;
 
+// Returns the warning snapshot that peerUuid authored in response, or null when
+// the response carries none.
+inline const ServerWarningPBs* authoritativeServerWarnings(
+    const ConsensusResponsePB& response,
+    const std::string& peerUuid) {
+  return response.has_server_warnings() && response.responder_uuid() == peerUuid
+      ? &response.server_warnings().warnings()
+      : nullptr;
+}
+
 // Tracks the state of the peers and which transactions they have replicated.
 // Owns the LogCache which actually holds the replicate messages which are
 // en route to the various peers.

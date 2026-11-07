@@ -2649,10 +2649,9 @@ bool PeerMessageQueue::DoResponseFromPeer(
     DCHECK(response.has_responder_uuid() && !response.responder_uuid().empty())
         << "Got response from peer with empty UUID";
 
-    // Warning snapshots are authoritative only for their destination peer.
-    if (response.responder_uuid() == peer_uuid) {
-      peer->lastServerWarnings.assign(
-          response.warnings().begin(), response.warnings().end());
+    if (const auto* warnings =
+            authoritativeServerWarnings(response, peer_uuid)) {
+      peer->lastServerWarnings.assign(warnings->begin(), warnings->end());
     }
 
     DCHECK(response.has_status()); // Responses should always have a status.

@@ -265,9 +265,8 @@ class ConsensusPeersTest : public KuduTest {
         ->mutable_last_received_current_leader()
         ->CopyFrom(MinimumOpId());
     seedResponse.mutable_status()->set_last_committed_idx(kMinimumOpIdIndex);
-    for (const auto& warning : seededWarnings) {
-      *seedResponse.add_warnings() = warning;
-    }
+    seedResponse.mutable_server_warnings()->mutable_warnings()->Add(
+        seededWarnings.begin(), seededWarnings.end());
     messageQueue_->ResponseFromPeer(kFollowerUuid, seedResponse);
 
     sendErrorResponseAndWait(peer);
@@ -285,9 +284,8 @@ class ConsensusPeersTest : public KuduTest {
     if (hasResponderUuid) {
       response.set_responder_uuid(responderUuid);
     }
-    for (const auto& warning : responseWarnings) {
-      *response.add_warnings() = warning;
-    }
+    response.mutable_server_warnings()->mutable_warnings()->Add(
+        responseWarnings.begin(), responseWarnings.end());
     response.mutable_error()->set_code(code);
     statusToPb(
         Status::NotFound("server error"),
@@ -299,12 +297,10 @@ class ConsensusPeersTest : public KuduTest {
         expectedWarnings);
   }
 
-  void testCannotPrepareWarningSnapshot(
+  static ConsensusResponsePB cannotPrepareResponse(
       bool hasResponderUuid,
       const string& responderUuid,
-      const std::vector<ServerWarningPB>& responseWarnings,
-      const std::vector<ServerWarningPB>& seededWarnings,
-      const std::vector<ServerWarningPB>& expectedWarnings) {
+      const std::vector<ServerWarningPB>& responseWarnings) {
     ConsensusResponsePB response;
     if (hasResponderUuid) {
       response.set_responder_uuid(responderUuid);
@@ -313,13 +309,25 @@ class ConsensusPeersTest : public KuduTest {
     response.mutable_status()->mutable_last_received_current_leader()->CopyFrom(
         MinimumOpId());
     response.mutable_status()->set_last_committed_idx(kMinimumOpIdIndex);
-    for (const auto& warning : responseWarnings) {
-      *response.add_warnings() = warning;
-    }
+    response.mutable_server_warnings()->mutable_warnings()->Add(
+        responseWarnings.begin(), responseWarnings.end());
     auto* error = response.mutable_status()->mutable_error();
     error->set_code(ConsensusErrorPB::CANNOT_PREPARE);
     statusToPb(Status::IllegalState("cannot prepare"), error->mutable_status());
-    testWarningSnapshot(response, seededWarnings, expectedWarnings);
+    return response;
+  }
+
+  void testCannotPrepareWarningSnapshot(
+      bool hasResponderUuid,
+      const string& responderUuid,
+      const std::vector<ServerWarningPB>& responseWarnings,
+      const std::vector<ServerWarningPB>& seededWarnings,
+      const std::vector<ServerWarningPB>& expectedWarnings) {
+    testWarningSnapshot(
+        cannotPrepareResponse(
+            hasResponderUuid, responderUuid, responseWarnings),
+        seededWarnings,
+        expectedWarnings);
   }
 
  protected:
@@ -465,6 +473,17 @@ TEST_F(ConsensusPeersTest, CannotPrepareWithoutResponderPreservesWarnings) {
       {makeWarning(ServerWarningPB::PLS_RECEIVED, 9012)},
       seededWarnings,
       seededWarnings);
+}
+
+TEST_F(
+    ConsensusPeersTest,
+    CannotPrepareWithoutServerWarningsPreservesWarnings) {
+  const std::vector<ServerWarningPB> seededWarnings = {
+      makeWarning(ServerWarningPB::PLS_RECEIVED, 1234),
+      makeWarning(ServerWarningPB::UNKNOWN, std::nullopt)};
+  auto response = cannotPrepareResponse(true, kFollowerUuid, {});
+  response.clear_server_warnings();
+  testWarningSnapshot(response, seededWarnings, seededWarnings);
 }
 
 TEST_F(ConsensusPeersTest, CannotPrepareWithEmptyWarningsClearsSnapshot) {

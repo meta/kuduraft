@@ -464,6 +464,10 @@ struct ServerWarning {
   2: optional i64 start_time;
 }
 
+struct ServerWarnings {
+  1: list<ServerWarning> warnings;
+}
+
 struct ConsensusResponse {
   // The uuid of the peer making the response.
   1: optional string responder_uuid;
@@ -490,11 +494,11 @@ struct ConsensusResponse {
   // A generic error message (such as tablet not found).
   8: optional ServerError error;
 
-  // Complete snapshot of active warnings from responder_uuid when it is
-  // nonempty and matches the request's ultimate dest_uuid. An authoritative
-  // empty snapshot clears prior warnings; otherwise callers preserve them.
-  // Warnings do not reject the consensus request.
-  9: list<ServerWarning> warnings;
+  // Complete snapshot of active warnings from responder_uuid when present and
+  // responder_uuid matches the request's ultimate dest_uuid. A present empty
+  // snapshot clears prior warnings; otherwise callers preserve them. Warnings
+  // do not reject the consensus request.
+  9: optional ServerWarnings server_warnings;
 }
 
 struct GetNodeInstanceRequest {}
