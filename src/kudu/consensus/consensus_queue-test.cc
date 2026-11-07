@@ -25,9 +25,11 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <ostream>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include <gflags/gflags.h>
@@ -72,6 +74,7 @@ DECLARE_int32(consensus_max_batch_size_bytes);
 DECLARE_bool(raft_throttle_gossip);
 DECLARE_int32(raft_throttle_gossip_interval_secs);
 DECLARE_int32(raft_throttle_gossip_max_entities);
+DECLARE_int32(unhealthy_threshold);
 // NOLINTEND(facebook-hte-PreventUseOfDeclareGflag)
 
 using kudu::consensus::HealthReportPB;
@@ -406,6 +409,162 @@ TEST_F(ConsensusQueueTest, MismatchedResponderDoesNotReplaceWarnings) {
   EXPECT_EQ(warnings[0].code(), ServerWarningPB::PLS_RECEIVED);
   ASSERT_TRUE(warnings[0].has_start_time());
   EXPECT_EQ(warnings[0].start_time(), 1234);
+}
+
+class QuorumPlsQueueTest : public ConsensusQueueTest {
+ public:
+  using WarningState = PeerMessageQueue::QuorumWarningState;
+
+  void SetUp() override {
+    ConsensusQueueTest::SetUp();
+    FLAGS_enable_flexi_raft = true;
+  }
+
+  static RaftConfigPB buildLocalQuorumConfig(size_t peerCount = 3) {
+    std::map<size_t, std::tuple<std::string, RaftPeerPB::MemberType>> members;
+    for (size_t i = 0; i < peerCount; ++i) {
+      members[i] = {kLeaderQuorumId, RaftPeerPB::VOTER};
+    }
+    return buildQuorumIdRaftConfigPbForTests(std::move(members));
+  }
+
+  void configureQuorumPls(const RaftConfigPB& config) {
+    queue_->setLeaderMode(kMinimumOpIdIndex, kMinimumTerm, config);
+    for (const RaftPeerPB& peer : config.peers()) {
+      if (peer.permanent_uuid() != kLeaderUuid) {
+        queue_->trackPeer(peer);
+        reportWarnings(peer, {});
+      }
+    }
+  }
+
+  std::optional<WarningState> getState(
+      ServerWarningPB::Code code = ServerWarningPB::PLS_RECEIVED) {
+    return queue_->getQuorumWarningState(code);
+  }
+
+  void assertState(
+      const WarningState& expected,
+      ServerWarningPB::Code code = ServerWarningPB::PLS_RECEIVED) {
+    const auto state = getState(code);
+    ASSERT_TRUE(state.has_value());
+    EXPECT_EQ(state->requiredVotes, expected.requiredVotes);
+    EXPECT_EQ(state->healthyVoters, expected.healthyVoters);
+    EXPECT_THAT(
+        state->warnings, testing::UnorderedElementsAreArray(expected.warnings));
+  }
+
+  static ServerWarningPB makeWarning(
+      std::optional<int64_t> startTime = std::nullopt,
+      ServerWarningPB::Code code = ServerWarningPB::PLS_RECEIVED) {
+    ServerWarningPB warning;
+    warning.set_code(code);
+    if (startTime.has_value()) {
+      warning.set_start_time(*startTime);
+    }
+    return warning;
+  }
+
+  void reportWarnings(
+      const RaftPeerPB& peer,
+      const std::vector<ServerWarningPB>& warnings) {
+    ConsensusResponsePB response;
+    response.set_responder_uuid(peer.permanent_uuid());
+    setLastReceivedAndLastCommitted(&response, MinimumOpId());
+    response.mutable_server_warnings()->mutable_warnings()->Add(
+        warnings.begin(), warnings.end());
+    queue_->ResponseFromPeer(peer.permanent_uuid(), response);
+  }
+
+  void markUnhealthy(const RaftPeerPB& peer) {
+    for (int i = 0; i < FLAGS_unhealthy_threshold; ++i) {
+      queue_->UpdatePeerStatus(
+          peer.permanent_uuid(),
+          PeerStatus::RpcLayerError,
+          Status::TimedOut("rpc timed out"));
+    }
+  }
+};
+
+TEST_F(QuorumPlsQueueTest, FiltersQuorumWarnings) {
+  auto config = buildRegionRaftConfigPbForTests({
+      {0, {kLeaderQuorumId, RaftPeerPB::VOTER}},
+      {1, {kLeaderQuorumId, RaftPeerPB::VOTER}},
+      {2, {kLeaderQuorumId, RaftPeerPB::VOTER}},
+      {3, {kLeaderQuorumId, RaftPeerPB::VOTER}},
+      {4, {kLeaderQuorumId, RaftPeerPB::VOTER}},
+      {5, {"r1", RaftPeerPB::VOTER}},
+      {6, {kLeaderQuorumId, RaftPeerPB::NON_VOTER}},
+  });
+  config.mutable_voter_distribution()->insert({kLeaderQuorumId, 9});
+  configureQuorumPls(config);
+  assertState({5, 5, {}});
+
+  markUnhealthy(config.peers(0));
+  EXPECT_FALSE(queue_->getTrackedPeerForTests(kLeaderUuid).isHealthy());
+
+  reportWarnings(
+      config.peers(1),
+      {makeWarning(30),
+       makeWarning(5, ServerWarningPB::UNKNOWN),
+       makeWarning(20),
+       makeWarning(40)});
+  reportWarnings(
+      config.peers(3), {makeWarning(), makeWarning(0), makeWarning(-1)});
+  reportWarnings(config.peers(2), {makeWarning(10)});
+  reportWarnings(config.peers(4), {makeWarning(20)});
+  markUnhealthy(config.peers(4));
+  reportWarnings(config.peers(5), {makeWarning(200)});
+  reportWarnings(config.peers(6), {makeWarning(300)});
+
+  assertState({5, 4, {{20, true}, {10, true}, {20, false}}});
+  assertState({5, 4, {{5, true}}}, ServerWarningPB::UNKNOWN);
+}
+
+TEST_F(QuorumPlsQueueTest, JointConfigNoSnapshot) {
+  auto config = buildLocalQuorumConfig(2);
+  config.mutable_next_config_peers()->CopyFrom(config.peers());
+  configureQuorumPls(config);
+  EXPECT_FALSE(getState().has_value());
+}
+
+TEST_F(QuorumPlsQueueTest, MissingCommitRuleNoSnapshot) {
+  configureQuorumPls(buildRaftConfigPbForTests(1));
+  EXPECT_FALSE(getState().has_value());
+}
+
+TEST_F(QuorumPlsQueueTest, ClosedQueueNoSnapshot) {
+  configureQuorumPls(buildLocalQuorumConfig());
+  queue_->Close();
+  EXPECT_FALSE(getState().has_value());
+}
+
+TEST_F(QuorumPlsQueueTest, NegativeVotesClampToZero) {
+  auto config = buildLocalQuorumConfig();
+  config.mutable_voter_distribution()->insert({kLeaderQuorumId, -4});
+  configureQuorumPls(config);
+  assertState({2, 3, {}});
+
+  queue_->setAdjustVoterDistribution(false);
+  assertState({0, 3, {}});
+}
+
+TEST_F(QuorumPlsQueueTest, NonLeaderNoSnapshot) {
+  const auto config = buildLocalQuorumConfig();
+  configureQuorumPls(config);
+  reportWarnings(config.peers(1), {makeWarning(100)});
+  assertState({2, 3, {{100, true}}});
+
+  queue_->setNonLeaderMode(config);
+  EXPECT_FALSE(getState().has_value());
+}
+
+TEST_F(QuorumPlsQueueTest, VanillaRaftNoSnapshot) {
+  const auto config = buildLocalQuorumConfig();
+  configureQuorumPls(config);
+  reportWarnings(config.peers(1), {makeWarning(100)});
+  FLAGS_enable_flexi_raft = false;
+  EXPECT_FALSE(getState().has_value());
 }
 
 // Tests that the queue is able to track a peer when it starts tracking a peer

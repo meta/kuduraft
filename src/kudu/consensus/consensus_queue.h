@@ -698,6 +698,30 @@ class PeerMessageQueue {
   datalossBoundEvidenceForTests(const std::string& uuid) const {
     return datalossBoundGuard_.peerEvidenceForTests(uuid);
   }
+  // Health uses TrackedPeer::isHealthy() and inherits its caveats.
+  // The local voter always counts as healthy; warnings cover remote voters
+  // only.
+  struct QuorumWarningState {
+    struct Warning {
+      int64_t startTime;
+      bool healthy;
+
+      bool operator==(const Warning&) const = default;
+    };
+
+    uint32_t requiredVotes;
+    uint32_t healthyVoters;
+    // Peer iteration is unordered, so callers must not depend on warning order.
+    std::vector<Warning> warnings;
+
+    bool operator==(const QuorumWarningState&) const = default;
+  };
+
+  // Returns a coherent local commit-quorum snapshot for 'warningCode'. Returns
+  // nullopt if the queue is closed or the active state cannot define a stable
+  // FlexiRaft commit quorum. Warning policy remains with the caller.
+  std::optional<QuorumWarningState> getQuorumWarningState(
+      ServerWarningPB::Code warningCode);
 
   std::optional<bool> IsPeerInLocalRegion(const std::string& uuid);
 

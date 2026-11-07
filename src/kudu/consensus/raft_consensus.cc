@@ -6049,6 +6049,24 @@ Status RaftConsensus::getQuorumHealth(PeerMessageQueue::QuorumHealth* health) {
   return queue->GetQuorumHealth(health);
 }
 
+std::optional<PeerMessageQueue::QuorumWarningState>
+RaftConsensus::getQuorumWarningState(ServerWarningPB::Code warningCode) {
+  PeerMessageQueue* queue = statusQueue_.load(std::memory_order_acquire);
+  const auto published = publishedStatus_.load();
+  if (queue == nullptr || published == nullptr) {
+    return std::nullopt;
+  }
+  auto state = queue->getQuorumWarningState(warningCode);
+  // A consensus change bumps the generation before its first queue write and
+  // publishes only when it releases consensusStateLock_. A capture that saw
+  // any of its writes took queueLock_ after them, so it sees the bump here.
+  if (cmeta_->consensusStateGeneration() !=
+      published->consensusStateGeneration) {
+    return std::nullopt;
+  }
+  return state;
+}
+
 void RaftConsensus::setStateMachineMetrics(
     std::shared_ptr<StateMachineMetricsInterface> s) {
   stateMachineMetrics_ = std::move(s);

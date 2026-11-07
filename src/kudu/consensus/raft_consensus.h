@@ -873,6 +873,12 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
 
   Status getQuorumHealth(PeerMessageQueue::QuorumHealth* health);
 
+  // See kudu::consensus::PeerMessageQueue::getQuorumWarningState(). Takes only
+  // queueLock_, and returns nullopt for a capture that may overlap a consensus
+  // change. Does not check for shutdown.
+  std::optional<PeerMessageQueue::QuorumWarningState> getQuorumWarningState(
+      ServerWarningPB::Code warningCode);
+
   Status getAllStateMachineMetrics(
       PeerMessageQueue::AllStateMachineMetrics* metrics);
 
@@ -1019,6 +1025,9 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
       RaftConsensusQuorumTest,
       TestReplicasEnforceTheLogMatchingProperty);
   FRIEND_TEST(RaftConsensusQuorumTest, TestRequestVote);
+  FRIEND_TEST(
+      RaftConsensusQuorumTest,
+      QuorumWarningStateRejectsRebuildInProgress);
 
   // RaftConsensus lifecycle states.
   //
@@ -1616,8 +1625,8 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
   // publication, so Init() publishes even though both generations start at 0.
   std::optional<StatusGenerations> publishedStatusGenerations_;
 
-  // queue_, for getStatusSnapshot(), which does not take consensusStateLock_.
-  // Set once in Start(); null before that.
+  // queue_, for getStatusSnapshot() and getQuorumWarningState(), which do not
+  // take consensusStateLock_. Set once in Start(); null before that.
   std::atomic<PeerMessageQueue*> statusQueue_{nullptr};
 
   // Guards the gossiped throttle state below. Deliberately a leaf: nothing is

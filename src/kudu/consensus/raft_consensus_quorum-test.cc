@@ -247,6 +247,25 @@ class RaftConsensusQuorumTest : public KuduTest {
     return Status::OK();
   }
 
+  Status buildQuorumConfig(int num) {
+    RETURN_NOT_OK(buildFsManagersAndLogs(num));
+    buildInitialRaftConfigPb(num);
+    for (auto& peer : *config_.mutable_peers()) {
+      peer.mutable_attrs()->set_quorum_id("quorum");
+    }
+    auto* commitRule = config_.mutable_commit_rule();
+    // CommitRulePB.mode is deprecated but still required.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    // @lint-ignore CLANGTIDY facebook-hte-Deprecated
+    commitRule->set_mode(QuorumMode::SINGLE_REGION_DYNAMIC);
+#pragma GCC diagnostic pop
+    commitRule->set_quorum_type(QuorumType::QUORUM_ID);
+    config_.mutable_voter_distribution()->insert({"quorum", num});
+    RETURN_NOT_OK(buildPeers());
+    return Status::OK();
+  }
+
   Status buildAndStartConfig(int num) {
     RETURN_NOT_OK(buildConfig(num));
     RETURN_NOT_OK(startPeers());
@@ -661,6 +680,53 @@ class RaftConsensusQuorumTest : public KuduTest {
     }
   }
 };
+
+TEST_F(RaftConsensusQuorumTest, QuorumWarningStateFollowsConsensusState) {
+  FLAGS_enable_flexi_raft = true;
+  ASSERT_OK(buildQuorumConfig(1));
+  shared_ptr<RaftConsensus> leader;
+  ASSERT_OK(peers_->getPeerByIdx(0, &leader));
+
+  EXPECT_FALSE(
+      leader->getQuorumWarningState(ServerWarningPB::PLS_RECEIVED).has_value());
+  ASSERT_OK(startPeers());
+  ASSERT_OK(leader->emulateElection());
+
+  PeerMessageQueue::QuorumWarningState expected{
+      .requiredVotes = 1,
+      .healthyVoters = 1,
+      .warnings = {},
+  };
+  EXPECT_EQ(
+      leader->getQuorumWarningState(ServerWarningPB::PLS_RECEIVED), expected);
+
+  leader->shutdown();
+  EXPECT_FALSE(
+      leader->getQuorumWarningState(ServerWarningPB::PLS_RECEIVED).has_value());
+}
+
+// A critical section that bumped the cmeta generation has not published yet, so
+// a capture inside it is rejected. The capture does not take
+// consensusStateLock_, or this would deadlock.
+TEST_F(RaftConsensusQuorumTest, QuorumWarningStateRejectsRebuildInProgress) {
+  FLAGS_enable_flexi_raft = true;
+  ASSERT_OK(buildQuorumConfig(1));
+  shared_ptr<RaftConsensus> leader;
+  ASSERT_OK(peers_->getPeerByIdx(0, &leader));
+  ASSERT_OK(startPeers());
+  ASSERT_OK(leader->emulateElection());
+  ASSERT_TRUE(
+      leader->getQuorumWarningState(ServerWarningPB::PLS_RECEIVED).has_value());
+
+  {
+    RaftConsensus::LockGuard l(leader->consensusStateLock_);
+    leader->cmeta_->setLeaderUuid(leader->cmeta_->leaderUuid());
+    EXPECT_FALSE(leader->getQuorumWarningState(ServerWarningPB::PLS_RECEIVED)
+                     .has_value());
+  }
+  EXPECT_TRUE(
+      leader->getQuorumWarningState(ServerWarningPB::PLS_RECEIVED).has_value());
+}
 
 // Tests Replicate/Commit a single message through the leader.
 TEST_F(RaftConsensusQuorumTest, TestFollowersReplicateAndCommitMessage) {

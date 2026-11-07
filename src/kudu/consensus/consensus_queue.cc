@@ -391,6 +391,26 @@ const char* peerStatusToString(PeerStatus p) {
 #endif
 }
 
+namespace {
+
+std::optional<int64_t> getWarningStartTime(
+    const PeerMessageQueue::TrackedPeer& peer,
+    ServerWarningPB::Code warningCode) {
+  std::optional<int64_t> startTime;
+  for (const auto& warning : peer.lastServerWarnings) {
+    if (warning.code() != warningCode || !warning.has_start_time() ||
+        warning.start_time() <= 0) {
+      continue;
+    }
+    // Keep the earliest positive onset if a peer repeats a warning code.
+    startTime = std::min(
+        startTime.value_or(warning.start_time()), warning.start_time());
+  }
+  return startTime;
+}
+
+} // namespace
+
 PeerMessageQueue::TrackedPeer::TrackedPeer(
     RaftPeerPB peer_pb,
     const PeerMessageQueue* queue)
@@ -2181,6 +2201,44 @@ void PeerMessageQueue::updateLastIndexAppendedToLeader(
   DCHECK_EQ(queueState_.mode, NON_LEADER);
   queueState_.last_idx_appended_to_leader = last_idx_appended_to_leader;
   UpdateLagMetricsUnlocked();
+}
+
+std::optional<PeerMessageQueue::QuorumWarningState>
+PeerMessageQueue::getQuorumWarningState(ServerWarningPB::Code warningCode) {
+  std::lock_guard<simple_mutexlock> lock(queueLock_);
+  if (queueState_.state == kQueueClosed || queueState_.mode != LEADER) {
+    return std::nullopt;
+  }
+
+  if (PREDICT_FALSE(
+          !FLAGS_enable_flexi_raft ||
+          !queueState_.active_config->has_commit_rule() ||
+          isJointConsensusPhase(*queueState_.active_config))) {
+    // This snapshot models one voter set, so it cannot represent joint
+    // consensus.
+    return std::nullopt;
+  }
+
+  QuorumWarningState state{};
+  const std::string& localUuid = localPeerPb_.permanent_uuid();
+  const QuorumResults quorum = IsQuorumSatisfiedUnlocked(
+      localPeerPb_, [&state, &localUuid, warningCode](const TrackedPeer* peer) {
+        // The local vote is always healthy. Only remote peers have warnings
+        // (DoLocalPeerAppendFinished() reports none).
+        const bool healthy = peer->uuid() == localUuid || peer->isHealthy();
+        const auto startTime = getWarningStartTime(*peer, warningCode);
+        if (startTime.has_value()) {
+          state.warnings.push_back({*startTime, healthy});
+        }
+        return healthy;
+      });
+
+  // With voter-distribution adjustment disabled, a negative distribution can
+  // yield a negative commit threshold. Zero preserves its already-satisfied
+  // semantics without wrapping the unsigned snapshot.
+  state.requiredVotes = static_cast<uint32_t>(std::max(0, quorum.quorum_size));
+  state.healthyVoters = static_cast<uint32_t>(quorum.num_satisfied);
+  return state;
 }
 
 void PeerMessageQueue::UpdatePeerStatus(
