@@ -485,11 +485,6 @@ bool PeerMessageQueue::TrackedPeer::isHealthy() const {
   return consecutiveFailures_ < FLAGS_unhealthy_threshold;
 }
 
-bool PeerMessageQueue::TrackedPeer::neverContacted() const {
-  return lastExchangeStatus == PeerStatus::New &&
-      consecutiveFailures_ == INT_MAX;
-}
-
 int32_t PeerMessageQueue::TrackedPeer::consecutiveFailures() const {
   return consecutiveFailures_;
 }
@@ -1589,7 +1584,7 @@ Status PeerMessageQueue::RequestForPeer(
 
       if (peer->proxyTargetEnabled()) {
         bool should_proxy = false;
-        if (peer->isHealthy() || peer->neverContacted()) {
+        if (peer->isHealthy()) {
           auto proxy_it = peersMap_.find(*next_hop_uuid);
           // Validate proxy peer exists and has non-null value.
           if (proxy_it != peersMap_.end() && proxy_it->second != nullptr &&
