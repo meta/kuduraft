@@ -196,6 +196,163 @@ TEST(DatalossBoundGuardTest, UnavailableReplyKeepsOnlyWhatWasConfirmed) {
   EXPECT_FALSE(guard->peerEvidenceForTests("peer-1").has_value());
 }
 
+// A write that would not fit is refused while the current lag is still within
+// the limits. Health reports that refusal for the hold window; the numbers it
+// reports do not change.
+TEST(DatalossBoundGuardTest, RefusalHoldsTheViolation) {
+  auto guard = remoteBehind(99, 0);
+  Config config = failClosed();
+  config.refusalHoldMs = 60000;
+  EXPECT_EQ(guard->health(config).status, DatalossBoundStatus::Ok);
+
+  EXPECT_FALSE(guard->admit(config, 1, 1).admitted);
+  auto health = guard->health(config);
+  EXPECT_EQ(health.status, DatalossBoundStatus::Violation);
+  EXPECT_EQ(health.reason, DatalossBoundReason::OpLimit);
+  EXPECT_EQ(health.bestOpsLag, 99);
+
+  config.refusalHoldMs = 0;
+  EXPECT_EQ(guard->health(config).status, DatalossBoundStatus::Ok);
+}
+
+// The hold ends as soon as the refused write would fit.
+TEST(DatalossBoundGuardTest, RefusalHoldEndsWhenTheWriteWouldFit) {
+  auto guard = remoteBehind(99, 0);
+  Config config = failClosed();
+  config.refusalHoldMs = 60000;
+  EXPECT_FALSE(guard->admit(config, 1, 1).admitted);
+  config.maxOps = 101;
+  EXPECT_EQ(guard->health(config).status, DatalossBoundStatus::Ok);
+
+  config.maxOps = 100;
+  EXPECT_EQ(guard->health(config).reason, DatalossBoundReason::OpLimit);
+  ack(*guard, "peer-1", kTailIndex);
+  ack(*guard, "peer-1", kTailIndex);
+  EXPECT_EQ(guard->health(config).status, DatalossBoundStatus::Ok);
+}
+
+TEST(DatalossBoundGuardTest, ByteLimitRefusalHoldsTheViolation) {
+  auto guard = remoteBehind(0, 9000);
+  Config config = failClosed();
+  config.refusalHoldMs = 60000;
+  EXPECT_EQ(guard->health(config).status, DatalossBoundStatus::Ok);
+  EXPECT_FALSE(guard->admit(config, 1, 2000).admitted);
+  EXPECT_EQ(guard->health(config).reason, DatalossBoundReason::ByteLimit);
+  // A smaller write still fits, and does not end the hold.
+  const auto small = guard->admit(config, 1, 100);
+  ASSERT_TRUE(small.admitted);
+  guard->release(small);
+  EXPECT_EQ(guard->health(config).reason, DatalossBoundReason::ByteLimit);
+}
+
+// The hold follows the latest refusal, not the largest.
+TEST(DatalossBoundGuardTest, LatestRefusalReplacesTheRecordedOne) {
+  auto guard = remoteBehind(0, 9000);
+  Config config = failClosed();
+  config.refusalHoldMs = 60000;
+  EXPECT_FALSE(guard->admit(config, 1, 2000).admitted);
+  EXPECT_FALSE(guard->admit(config, 1, 1500).admitted);
+  // The 1500-byte write would now fit; the 2000-byte one would not.
+  config.maxBytes = 10600;
+  EXPECT_EQ(guard->health(config).status, DatalossBoundStatus::Ok);
+}
+
+// A write the budget cannot hold says nothing about the lag.
+TEST(DatalossBoundGuardTest, OversizedWriteDoesNotHold) {
+  auto guard = remoteBehind(0, 0);
+  Config config = failClosed();
+  config.refusalHoldMs = 60000;
+  EXPECT_FALSE(guard->admit(config, 1, 20000).admitted);
+  EXPECT_EQ(guard->health(config).status, DatalossBoundStatus::Ok);
+}
+
+// Nor does it replace the refusal the hold reports.
+TEST(DatalossBoundGuardTest, OversizedWriteKeepsTheRecordedRefusal) {
+  auto guard = remoteBehind(99, 0);
+  Config config = failClosed();
+  config.refusalHoldMs = 60000;
+  EXPECT_FALSE(guard->admit(config, 1, 1).admitted);
+  EXPECT_FALSE(guard->admit(config, 1, 20000).admitted);
+  EXPECT_EQ(guard->health(config).reason, DatalossBoundReason::OpLimit);
+}
+
+TEST(DatalossBoundGuardTest, WouldBeRefusalHoldsTheViolation) {
+  auto guard = remoteBehind(99, 0);
+  Config config = failOpen();
+  config.refusalHoldMs = 60000;
+  const auto decision = guard->admit(config, 1, 1);
+  ASSERT_TRUE(decision.admitted);
+  guard->release(decision);
+  EXPECT_EQ(reasonOf(*guard), DatalossBoundReason::None);
+  EXPECT_EQ(guard->health(config).reason, DatalossBoundReason::OpLimit);
+}
+
+TEST(DatalossBoundGuardTest, RefusalHoldEndsOnExpiryOrRoleChange) {
+  auto guard = remoteBehind(99, 0);
+  Config config = failClosed();
+  config.refusalHoldMs = 60000;
+  EXPECT_FALSE(guard->admit(config, 1, 1).admitted);
+  EXPECT_EQ(guard->health(config).status, DatalossBoundStatus::Violation);
+  config.refusalHoldMs = 1;
+  SleepFor(MonoDelta::FromMilliseconds(10));
+  EXPECT_EQ(guard->health(config).status, DatalossBoundStatus::Ok);
+
+  // After each event the remote falls 99 entries behind again, where the
+  // refused write would still not fit.
+  config.refusalHoldMs = 60000;
+  int64_t tail = kTailIndex;
+  const auto expectClearedBy = [&](const auto& event) {
+    EXPECT_FALSE(guard->admit(config, 1, 1).admitted);
+    EXPECT_EQ(guard->health(config).status, DatalossBoundStatus::Violation);
+    event();
+    guard->setEligibleRemotes({"peer-1"}, {"peer-1"});
+    ack(*guard, "peer-1", tail);
+    ack(*guard, "peer-1", tail);
+    tail += 99;
+    guard->onAppend(tail, 0);
+    EXPECT_EQ(guard->health(config).status, DatalossBoundStatus::Ok);
+  };
+  expectClearedBy([&] {
+    guard->becomeFollower();
+    guard->becomeLeader(MonoTime::Now());
+  });
+  expectClearedBy([&] {
+    guard->setMeasuring(false, MonoTime::Now());
+    guard->setMeasuring(true, MonoTime::Now());
+  });
+}
+
+// A write that no longer fits the budget at any lag, after the limit was
+// lowered, says nothing about the lag either.
+TEST(DatalossBoundGuardTest, LoweredLimitEndsTheHold) {
+  auto guard = remoteBehind(50, 0);
+  Config config = failClosed();
+  config.refusalHoldMs = 60000;
+  EXPECT_FALSE(guard->admit(config, 60, 1).admitted);
+  EXPECT_EQ(guard->health(config).reason, DatalossBoundReason::OpLimit);
+  config.maxOps = 60;
+  EXPECT_EQ(guard->health(config).status, DatalossBoundStatus::Ok);
+}
+
+// A refusal for any other reason is reported for as long as its condition
+// holds, and no longer.
+TEST(DatalossBoundGuardTest, OnlyLimitRefusalsHold) {
+  DatalossBoundGuard guard;
+  guard.setMeasuring(true, MonoTime::Now());
+  guard.onAppend(kTailIndex, kTailBytes);
+  guard.becomeLeader(MonoTime::Now());
+  guard.setEligibleRemotes({"peer-1"}, {"peer-1"});
+  Config config = failClosed();
+  config.refusalHoldMs = 60000;
+  EXPECT_EQ(
+      guard.admit(config, 1, 1).reason, DatalossBoundReason::LeaderBootstrap);
+  // 99 entries behind, where a held write would not fit.
+  ack(guard, "peer-1", kTailIndex);
+  ack(guard, "peer-1", kTailIndex);
+  guard.onAppend(kTailIndex + 99, 0);
+  EXPECT_EQ(guard.health(config).status, DatalossBoundStatus::Ok);
+}
+
 TEST(DatalossBoundGuardTest, ReasonsWithoutAWatermark) {
   DatalossBoundGuard guard;
   guard.setMeasuring(true, MonoTime::Now());

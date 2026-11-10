@@ -254,6 +254,15 @@ DEFINE_int32(
 TAG_FLAG(dataloss_bound_margin_percent, experimental);
 
 DEFINE_int32(
+    dataloss_bound_refusal_hold_ms,
+    30000,
+    "The longest the data-loss bound reports a violation after it refused a "
+    "write for the operation or byte limit, or would have under FAIL_OPEN. "
+    "Such a write can be refused while the current lag is within the limits, "
+    "when it would not fit; the violation ends once it would fit.");
+TAG_FLAG(dataloss_bound_refusal_hold_ms, experimental);
+
+DEFINE_int32(
     min_corruption_count,
     5,
     "The minimum times a peer reports corruption since the start of exchanges "
@@ -1223,7 +1232,8 @@ DatalossBoundGuard::Config PeerMessageQueue::datalossBoundConfig() const {
       .failClosed = mode == kDatalossBoundFailClosed,
       .maxOps = FLAGS_dataloss_bound_max_ops,
       .maxBytes = FLAGS_dataloss_bound_max_bytes,
-      .marginPercent = FLAGS_dataloss_bound_margin_percent};
+      .marginPercent = FLAGS_dataloss_bound_margin_percent,
+      .refusalHoldMs = FLAGS_dataloss_bound_refusal_hold_ms};
 }
 
 AdmissionDecision PeerMessageQueue::admitProtectedWrite(

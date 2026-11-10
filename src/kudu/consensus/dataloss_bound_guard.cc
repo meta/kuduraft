@@ -33,6 +33,21 @@ int64_t limitAfterMargin(int64_t limit, int32_t marginPercent) {
       : limit / 100 * marginPct;
   return limit - margin;
 }
+
+// Whether a write of 'ops' entries and 'bytes' bytes fits 'budget' with
+// nothing lagging. The limits are exclusive, so a write that does not is
+// refused at any lag.
+bool fitsAnEmptyBudget(
+    const std::optional<DatalossBoundGuard::UsableBudget>& budget,
+    int64_t ops,
+    int64_t bytes) {
+  return budget.has_value() && ops < budget->ops && bytes < budget->bytes;
+}
+
+bool isLimitReason(DatalossBoundReason reason) {
+  return reason == DatalossBoundReason::OpLimit ||
+      reason == DatalossBoundReason::ByteLimit;
+}
 } // namespace
 
 const char* datalossBoundStatusName(DatalossBoundStatus s) {
@@ -116,6 +131,7 @@ void DatalossBoundGuard::becomeLeader(MonoTime now) {
   role_ = Role::Leader;
   evidence_.clear();
   eligible_.clear();
+  lastRefusal_ = MonoTime::Min();
   generation_.fetch_add(1, std::memory_order_relaxed);
   startPeriodUnlocked(now);
 }
@@ -125,6 +141,7 @@ void DatalossBoundGuard::becomeFollower() {
   role_ = Role::Follower;
   evidence_.clear();
   eligible_.clear();
+  lastRefusal_ = MonoTime::Min();
   generation_.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -138,6 +155,7 @@ void DatalossBoundGuard::setMeasuring(bool measuring, MonoTime now) {
     return;
   }
   generation_.fetch_add(1, std::memory_order_relaxed);
+  lastRefusal_ = MonoTime::Min();
   for (auto& [uuid, evidence] : evidence_) {
     evidence.confirmedWatermark.reset();
     evidence.pendingWatermark.reset();
@@ -314,7 +332,26 @@ bool DatalossBoundGuard::installReconstructedWatermark(
 
 DatalossBoundHealth DatalossBoundGuard::health(const Config& config) const {
   std::lock_guard<simple_mutexlock> lock(admissionLock_);
-  return evaluateUnlocked(config, /*proposedOps=*/0, /*proposedBytes=*/0);
+  auto health =
+      evaluateUnlocked(config, /*proposedOps=*/0, /*proposedBytes=*/0);
+  // While the lag alone is within the limits, report the last limit refusal
+  // within the hold window if that write still would not fit. A write that no
+  // longer fits at any lag, after the limits were lowered, says nothing about
+  // the lag.
+  if (health.status == DatalossBoundStatus::Ok &&
+      lastRefusal_ != MonoTime::Min() &&
+      MonoTime::Now() - lastRefusal_ <
+          MonoDelta::FromMilliseconds(config.refusalHoldMs) &&
+      fitsAnEmptyBudget(
+          usableBudget(config), lastRefusalOps_, lastRefusalBytes_)) {
+    const auto again =
+        evaluateUnlocked(config, lastRefusalOps_, lastRefusalBytes_);
+    if (isLimitReason(again.reason)) {
+      health.status = DatalossBoundStatus::Violation;
+      health.reason = again.reason;
+    }
+  }
+  return health;
 }
 
 DatalossBoundHealth DatalossBoundGuard::evaluateUnlocked(
@@ -479,6 +516,14 @@ DatalossBoundGuard::admit(const Config& config, int64_t ops, int64_t bytes) {
     decision.reason = health.reason;
     decision.admitted =
         !(config.failClosed && health.status == DatalossBoundStatus::Violation);
+    // A write the budget cannot hold is refused at any lag, so its refusal
+    // says nothing about the lag.
+    if (isLimitReason(health.reason) &&
+        fitsAnEmptyBudget(budget, reservedOps, reservedBytes)) {
+      lastRefusal_ = MonoTime::Now();
+      lastRefusalOps_ = reservedOps;
+      lastRefusalBytes_ = reservedBytes;
+    }
     if (decision.admitted && !invalidProposal) {
       reservedOps_.fetch_add(reservedOps, std::memory_order_relaxed);
       reservedBytes_.fetch_add(reservedBytes, std::memory_order_relaxed);

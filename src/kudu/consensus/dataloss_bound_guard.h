@@ -147,6 +147,10 @@ class DatalossBoundGuard {
     int64_t maxOps = 0;
     int64_t maxBytes = 0;
     int32_t marginPercent = 0;
+    // The longest health() reports a violation after admission refused a
+    // write for a limit, or would have under FAIL_OPEN, while that write still
+    // would not fit.
+    int32_t refusalHoldMs = 0;
   };
 
   // The limits less the configured margin.
@@ -265,7 +269,13 @@ class DatalossBoundGuard {
       int64_t generation);
 
   // Lag against the leader's last appended log entries, plus admitted writes
-  // not yet in the log.
+  // not yet in the log. While the lag is within the limits a write can still
+  // be refused for one, when it would not fit, so for up to
+  // config.refusalHoldMs after such a refusal the status reports that limit's
+  // violation for as long as the refused write still would not fit. The lag,
+  // headroom and qualifying remotes describe the lag alone. The other reasons
+  // last exactly as long as their condition. Admission never consults the
+  // hold.
   [[nodiscard]] DatalossBoundHealth health(const Config& config) const;
 
   // Decides whether a protected write of 'ops' Raft entries and 'bytes' of
@@ -348,6 +358,12 @@ class DatalossBoundGuard {
   std::atomic<int64_t> tailIndex_{0};
   std::atomic<int64_t> cumulativePayloadBytes_{0};
   std::atomic<int64_t> generation_{0};
+
+  // When admission last refused a write for a limit while leading, or would
+  // have under FAIL_OPEN, and that write's size. Read by health().
+  MonoTime lastRefusal_{MonoTime::Min()};
+  int64_t lastRefusalOps_ = 0;
+  int64_t lastRefusalBytes_ = 0;
 
   // Per measurement period.
   MonoTime periodStart_{MonoTime::Min()};
