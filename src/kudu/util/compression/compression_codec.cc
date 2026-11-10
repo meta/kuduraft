@@ -140,10 +140,11 @@ class Lz4Codec : public CompressionCodec {
       const Slice& input,
       uint8_t* compressed,
       size_t* compressedLength) override {
-    int n = LZ4_compress(
+    int n = LZ4_compress_default(
         reinterpret_cast<const char*>(input.data()),
         reinterpret_cast<char*>(compressed),
-        input.size());
+        input.size(),
+        maxCompressedLength(input.size()));
     *compressedLength = n;
     return Status::OK();
   }
