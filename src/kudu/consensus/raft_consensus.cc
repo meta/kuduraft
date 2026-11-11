@@ -1391,10 +1391,24 @@ Status RaftConsensus::replicate(const std::shared_ptr<ConsensusRound>& round) {
 }
 
 Status RaftConsensus::truncateCallbackWithRaftLock(
-    int64_t* index_if_truncated) {
+    int64_t* index_if_truncated,
+    std::optional<int64_t> expected_term) {
   ThreadRestrictions::assertWaitAllowed();
   LockGuard l(consensusStateLock_);
   RETURN_NOT_OK(checkRunningUnlocked());
+  if (expected_term &&
+      (currentTermUnlocked() != *expected_term ||
+       cmeta_->activeRole() == RaftPeerPB::LEADER)) {
+    if (index_if_truncated) {
+      *index_if_truncated = -1;
+    }
+    return Status::Aborted(
+        fmt::format(
+            "Not truncating for term {}: current term {}, role {}",
+            *expected_term,
+            currentTermUnlocked(),
+            RaftPeerPB::Role_Name(cmeta_->activeRole())));
+  }
 
   // We pass -1 to TruncateOpsAfter in the log abstraction
   // It is the responsibility of the derived log to truncate from

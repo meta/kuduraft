@@ -633,7 +633,12 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
   // pattern that is used by UpdateReplica while invoking truncateOpsAfter
   // @param index_if_truncated - the log specialization will return the
   // truncated index if truncation happened.
-  Status truncateCallbackWithRaftLock(int64_t* index_if_truncated);
+  // @param expected_term - if set, returns Aborted without truncating unless,
+  // under the same lock, the current term is `expected_term` and this replica
+  // is not the leader.
+  Status truncateCallbackWithRaftLock(
+      int64_t* index_if_truncated,
+      std::optional<int64_t> expected_term = std::nullopt);
 
   // Returns the last OpId (either received or committed, depending on the
   // 'type' argument) that the Consensus implementation knows about.
