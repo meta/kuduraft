@@ -381,4 +381,11 @@ DEFINE_dynamic_timeseries(
     "{}.timeout_connection_kill",
     facebook::fb303::ExportType::SUM);
 
+// ---- mysql_raft/log/TruncatedBinlogArchiver.cpp: counters ----
+
+DEFINE_dynamic_timeseries(
+    truncatedBinlogArchive,
+    "truncated_binlog_archive.{}",
+    facebook::fb303::ExportType::SUM);
+
 } // namespace kudu

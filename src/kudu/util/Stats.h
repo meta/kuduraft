@@ -154,4 +154,9 @@ DECLARE_dynamic_quantile_stat(handlerLatency, 2);
 // --- rpc/connection.cc: counter ---
 DECLARE_dynamic_timeseries(timeoutConnectionKill, 1);
 
+// --- mysql_raft/log/TruncatedBinlogArchiver.cpp: truncated binlog archival ---
+// One counter per event, keyed by the event name. Each BinlogWrapper exports
+// every key at zero, whether archival is on or off.
+DECLARE_dynamic_timeseries(truncatedBinlogArchive, 1);
+
 } // namespace kudu
