@@ -2477,11 +2477,17 @@ Status RaftConsensus::updateReplica(
       persistentVars_->setCompressionDictionary(compressionDict);
       RETURN_NOT_OK(persistentVars_->flush());
     }
+
+    // We decide whether to use direct decompression for the whole batch here
+    // so we don't load the boolean for every message, which means changes to
+    // the rpl_raft_direct_decompression sysvar may not take effect immediately
+    const bool directDecompression = !messages.empty() &&
+        directDecompression_.load(std::memory_order_relaxed);
     while (iter != messages.end()) {
       // Create a ReplicateMsgWrapper which handles compression, here we'll be
       // decompressing the msg
       ReplicateMsgWrapper msgWrapper(*iter);
-      prepareStatus = msgWrapper.init(&compressionBuffer_);
+      prepareStatus = msgWrapper.init(&compressionBuffer_, directDecompression);
 
       if (prepareStatus.ok()) {
         prepareStatus = startFollowerTransactionUnlocked(msgWrapper);
@@ -5743,6 +5749,18 @@ Status RaftConsensus::setCompressionLevel(int level) {
 Status RaftConsensus::setEnableCompressionOnCacheMiss(bool enable) {
   LockGuard l(consensusStateLock_);
   return queue_->log_cache()->setEnableCompressionOnCacheMiss(enable);
+}
+
+void RaftConsensus::setDirectDecompression(bool enable) {
+  directDecompression_.store(enable, std::memory_order_relaxed);
+}
+
+size_t RaftConsensus::clearCompressionBuffer() {
+  LockGuard l(consensusStateLock_);
+  const size_t capacity = compressionBuffer_.capacity();
+  compressionBuffer_.clear();
+  compressionBuffer_.shrinkToFit();
+  return capacity;
 }
 
 Status RaftConsensus::loadCompressionDict(const std::string& filename) {

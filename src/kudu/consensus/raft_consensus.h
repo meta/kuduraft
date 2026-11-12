@@ -849,6 +849,12 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
   // Enables (or disables) compression of messages read from log
   Status setEnableCompressionOnCacheMiss(bool enable);
 
+  void setDirectDecompression(bool enable);
+
+  // Frees compressionBuffer_'s heap storage and returns its prior capacity.
+  // Blocks on consensusStateLock_, which every user of the buffer holds.
+  size_t clearCompressionBuffer();
+
   // Load and set compression dictionary from file
   Status loadCompressionDict(const std::string& filename);
 
@@ -1790,6 +1796,7 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
   std::shared_ptr<Counter> raftProxyNumRequestsHopsRemainingExhausted_;
 
   faststring compressionBuffer_;
+  std::atomic<bool> directDecompression_{false};
 
   CheckQuorumFailureCallback checkQuorumFailureCallback_;
   int32_t checkQuorumIntervalHeartbeats_;
