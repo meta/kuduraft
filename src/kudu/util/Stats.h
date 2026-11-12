@@ -39,6 +39,7 @@ constexpr std::string_view statsFileTag(std::string_view filename) {
 
 // --- Existing ---
 DECLARE_dynamic_timeseries(kuduCheckViolations, 1);
+DECLARE_timeseries(raftDirectDecompressions);
 
 // --- raft_consensus.cc: existing timeseries (converted to dynamic) ---
 DECLARE_dynamic_timeseries(raftLogTruncationCounter, 1);

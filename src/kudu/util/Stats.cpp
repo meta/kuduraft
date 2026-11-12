@@ -9,6 +9,11 @@ DEFINE_dynamic_timeseries(
     "kudu_check_violations.{}.count",
     facebook::fb303::ExportType::COUNT);
 
+DEFINE_timeseries(
+    raftDirectDecompressions,
+    "raft_direct_decompressions",
+    facebook::fb303::SUM);
+
 // ---- raft_consensus.cc: existing timeseries (converted to dynamic) ----
 
 DEFINE_dynamic_timeseries(
