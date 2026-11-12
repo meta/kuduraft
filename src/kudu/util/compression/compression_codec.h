@@ -90,6 +90,7 @@ class CompressionCodec {
   // calling the compress routine, this routine stores the uncompressed data
   // to uncompressed[0..uncompressed_length-1]
   // returns false if the message is corrupted and could not be uncompressed
+  // or if it did not write exactly uncompressed_length bytes
   virtual Status uncompress(
       const Slice& compressed,
       uint8_t* uncompressed,

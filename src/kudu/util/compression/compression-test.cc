@@ -18,6 +18,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -73,7 +75,7 @@ static void testCompressionCodec(CompressionType compression) {
 }
 
 TEST_F(TestCompression, TestNoCompressionCodec) {
-  const CompressionCodec* codec;
+  std::shared_ptr<CompressionCodec> codec;
   ASSERT_OK(CompressionCodecManager::getCodec(NO_COMPRESSION, &codec));
   ASSERT_EQ(nullptr, codec);
 }
@@ -88,6 +90,33 @@ TEST_F(TestCompression, TestLz4CompressionCodec) {
 
 TEST_F(TestCompression, TestZlibCompressionCodec) {
   testCompressionCodec(ZLIB);
+}
+
+TEST_F(TestCompression, TestUncompressRejectsDeclaredSizeMismatch) {
+  const std::string input(64, 'Z');
+  for (const CompressionType type :
+       {SNAPPY, LZ4, LZ4_DICT, ZLIB, ZSTD, ZSTD_DICT}) {
+    SCOPED_TRACE(CompressionType_Name(type));
+    std::shared_ptr<CompressionCodec> codec;
+    ASSERT_OK(CompressionCodecManager::getCodec(type, &codec));
+    if (type == LZ4_DICT || type == ZSTD_DICT) {
+      ASSERT_OK(codec->setDictionary(std::string(4096, 'd')));
+    }
+    std::vector<uint8_t> compressed(codec->maxCompressedLength(input.size()));
+    size_t compressedLen = 0;
+    ASSERT_OK(codec->compress(Slice(input), compressed.data(), &compressedLen));
+    const Slice frame(compressed.data(), compressedLen);
+
+    // One spare byte keeps a codec that ignores the declared size in bounds
+    std::vector<uint8_t> output(input.size() + 1);
+    ASSERT_OK(codec->uncompress(frame, output.data(), input.size()));
+    EXPECT_TRUE(codec->uncompress(frame, output.data(), input.size() + 1)
+                    .IsCorruption());
+    EXPECT_TRUE(codec->uncompress(frame, output.data(), input.size() - 1)
+                    .IsCorruption());
+    // A rejected call must not break the next one
+    ASSERT_OK(codec->uncompress(frame, output.data(), input.size()));
+  }
 }
 
 } // namespace kudu

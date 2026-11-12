@@ -94,6 +94,17 @@ std::string CompressionCodec::stats() const {
   }
 }
 
+static Status checkUncompressedLength(size_t actual, size_t expected) {
+  if (actual == expected) {
+    return Status::OK();
+  }
+  return Status::Corruption(
+      fmt::format(
+          "uncompressed length {} does not match the expected {}",
+          actual,
+          expected));
+}
+
 class SnappyCodec : public CompressionCodec {
  public:
   Status compress(
@@ -111,11 +122,18 @@ class SnappyCodec : public CompressionCodec {
   Status uncompress(
       const Slice& compressed,
       uint8_t* uncompressed,
-      size_t /* uncompressedLength */) override {
+      size_t uncompressedLength) override {
+    const char* data = reinterpret_cast<const char*>(compressed.data());
+    // RawUncompress writes the length recorded in the stream, so it must be
+    // checked before anything is written
+    size_t streamLength = 0;
+    if (!snappy::GetUncompressedLength(
+            data, compressed.size(), &streamLength)) {
+      return Status::Corruption("unable to read the uncompressed length");
+    }
+    RETURN_NOT_OK(checkUncompressedLength(streamLength, uncompressedLength));
     bool success = snappy::RawUncompress(
-        reinterpret_cast<const char*>(compressed.data()),
-        compressed.size(),
-        reinterpret_cast<char*>(uncompressed));
+        data, compressed.size(), reinterpret_cast<char*>(uncompressed));
     return success ? Status::OK()
                    : Status::Corruption("unable to uncompress the buffer");
   }
@@ -275,6 +293,7 @@ class Lz4DictCodec : public CompressionCodec {
     size_t compressedSize = compressed.size() - frameInfoSize;
     const uint8_t* compressedBuf = compressed.data() + frameInfoSize;
 
+    const size_t expectedLength = uncompressedLength;
     ret = LZ4F_decompress_usingDict(
         decompressionCtx_,
         uncompressed,
@@ -291,7 +310,15 @@ class Lz4DictCodec : public CompressionCodec {
               "Unable to decompress the buffer: {}", LZ4F_getErrorName(ret)));
     }
 
-    return Status::OK();
+    // A nonzero return means the frame is unfinished, and the reused context
+    // would carry its state into the next call
+    Status status = ret == 0
+        ? checkUncompressedLength(uncompressedLength, expectedLength)
+        : Status::Corruption("incomplete LZ4 frame");
+    if (!status.ok()) {
+      LZ4F_resetDecompressionContext(decompressionCtx_);
+    }
+    return status;
   }
 
   size_t maxCompressedLength(size_t sourceBytes) const override {
@@ -356,13 +383,13 @@ class ZlibCodec : public CompressionCodec {
       const Slice& compressed,
       uint8_t* uncompressed,
       size_t uncompressedLength) override {
+    uLongf written = uncompressedLength;
     int err = ::uncompress(
-        uncompressed,
-        &uncompressedLength,
-        compressed.data(),
-        compressed.size());
-    return err == Z_OK ? Status::OK()
-                       : Status::Corruption("unable to uncompress the buffer");
+        uncompressed, &written, compressed.data(), compressed.size());
+    if (err != Z_OK) {
+      return Status::Corruption("unable to uncompress the buffer");
+    }
+    return checkUncompressedLength(written, uncompressedLength);
   }
 
   size_t maxCompressedLength(size_t sourceBytes) const override {
@@ -429,7 +456,7 @@ class ZstdCodec : public CompressionCodec {
           fmt::format(
               "unable to uncompress the buffer: {}", ZSTD_getErrorName(ret)));
     }
-    return Status::OK();
+    return checkUncompressedLength(ret, uncompressedLength);
   }
 
   size_t maxCompressedLength(size_t sourceBytes) const override {
@@ -532,7 +559,7 @@ class ZstdDictCodec : public CompressionCodec {
               "unable to uncompress the buffer: {}", ZSTD_getErrorName(ret)));
     }
 
-    return Status::OK();
+    return checkUncompressedLength(ret, uncompressedLength);
   }
 
   size_t maxCompressedLength(size_t sourceBytes) const override {
