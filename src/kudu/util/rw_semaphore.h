@@ -99,35 +99,6 @@ class RwSemaphore {
     }
   }
 
-  // Tries to acquire a write lock, if no one else has it.
-  // This function retries on CAS failure and waits for readers to complete.
-  bool try_lock() {
-    int loopCount = 0;
-    Atomic32 curState = base::subtle::noBarrierLoad(&state_);
-    while (true) {
-      // someone else has already the write lock
-      if (curState & kWriteFlag) {
-        return false;
-      }
-
-      Atomic32 expected =
-          curState & kNumReadersMask; // I expect some 0+ readers
-      Atomic32 tryNewState =
-          kWriteFlag | expected; // I want to lock the other writers
-      curState =
-          base::subtle::Acquire_CompareAndSwap(&state_, expected, tryNewState);
-      if (curState == expected) {
-        break;
-      }
-      // Either was already locked by someone else, or CAS failed.
-      boost::detail::yield(loopCount++);
-    }
-
-    waitPendingReaders();
-    recordLockHolderStack();
-    return true;
-  }
-
   void lock() {
     int loopCount = 0;
     Atomic32 curState = base::subtle::noBarrierLoad(&state_);
@@ -159,19 +130,6 @@ class RwSemaphore {
     resetLockHolderStack();
     // Reset: no writers & no readers.
     releaseStore(&state_, 0);
-  }
-
-  // Return true if the lock is currently held for write by any thread.
-  // See simple_semaphore::isLocked() for details about where this is useful.
-  bool isWriteLocked() const {
-    return base::subtle::noBarrierLoad(&state_) & kWriteFlag;
-  }
-
-  // Return true if the lock is currently held, either for read or write
-  // by any thread.
-  // See simple_semaphore::isLocked() for details about where this is useful.
-  bool isLocked() const {
-    return base::subtle::noBarrierLoad(&state_);
   }
 
  private:
