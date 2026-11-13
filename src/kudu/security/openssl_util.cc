@@ -51,7 +51,7 @@ namespace {
 // Thread safety:
 // - written by doInitializeOpenSsl (single-threaded, due to std::call_once)
 // - read by disableOpenSslInitialization (must not be concurrent with above)
-bool gSslIsInitialized = false;
+[[maybe_unused]] bool gSslIsInitialized = false;
 
 // If true, then we expect someone else has initialized SSL.
 //

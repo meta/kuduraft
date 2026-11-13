@@ -93,7 +93,7 @@ namespace {
 
 SpinLock loggingMutex(base::kLinkerInitialized);
 
-int initialStderrSeverity;
+[[maybe_unused]] int initialStderrSeverity;
 
 void flushCoverageOnExit() {
   // Coverage flushing is not re-entrant, but this might be called from a
