@@ -56,7 +56,7 @@ class Clock : public std::enable_shared_from_this<Clock> {
   // on any machine in the cluster.
   //
   // NOTE: this is not a very tight bound.
-  virtual Status getGlobalLatest(Timestamp* t) {
+  virtual Status getGlobalLatest(Timestamp* /* t */) {
     return Status::NotSupported("clock does not support global properties");
   }
 
