@@ -12,7 +12,6 @@
 #include <cstdint>
 
 #include "kudu/gutil/hash/builtin_type_hash.h"
-#include "kudu/gutil/hash/string_hash.h"
 
 // Hash32 is for legacy use only.
 using Hash32 = uint32_t;
