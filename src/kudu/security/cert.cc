@@ -23,7 +23,6 @@
 #include <string>
 
 #include <glog/logging.h>
-#include <openssl/evp.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 

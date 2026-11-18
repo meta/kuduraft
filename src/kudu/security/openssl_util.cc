@@ -25,7 +25,6 @@
 #include <vector>
 
 #include <glog/logging.h>
-#include <openssl/crypto.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
 
