@@ -663,7 +663,7 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
   // Thread-safe.
   const std::string& peer_uuid() const;
 
-  // Returns the hostport of this peer.
+  // Returns the hostport of this peer. Thread-safe.
   std::pair<std::string, unsigned int> peer_hostport() const;
 
   // relevant for Flexi-Raft
@@ -672,7 +672,8 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
   // It is own peer region or quorum_id
   std::string peer_quorum_id(bool need_lock = true) const;
 
-  // For catching up peers
+  // For catching up peers. Read from the published status snapshot, without
+  // consensusStateLock_; false / 0 before Init().
   bool peer_is_standby_member() const;
   uint32_t peer_standby_start_timestamp() const;
 
@@ -932,6 +933,8 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
     std::string leaderUuid;
     std::pair<std::string, unsigned int> leaderHostPort;
     std::string peerQuorumId;
+    bool isStandbyMember{false};
+    uint32_t standbyStartTimestamp{0};
     std::string proxyPolicy;
     std::string compressionStats;
     QuorumType quorumType{QuorumType::REGION};
@@ -1587,8 +1590,16 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
 
   const ConsensusOptions options_;
 
-  // Information about the local peer, including the local UUID.
+  // Information about the local peer, including the local UUID. member_type
+  // and attrs are rewritten under consensusStateLock_ on config changes; read
+  // them under that lock or from publishedStatus_.
   RaftPeerPB localPeerPb_;
+
+  // localPeerPb_'s permanent_uuid and last_known_addr, which never change,
+  // copied so that peer_uuid() and peer_hostport() do not read localPeerPb_
+  // while it is rewritten.
+  const std::string localUuid_;
+  const std::pair<std::string, unsigned int> localHostPort_;
 
   // Consensus metadata service.
   const std::shared_ptr<ConsensusMetadataManager> cmetaManager_;

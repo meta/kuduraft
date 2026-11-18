@@ -359,6 +359,14 @@ RaftConsensus::RaftConsensus(
     ThreadPool* raftPool)
     : options_(std::move(options)),
       localPeerPb_(std::move(localPeerPb)),
+      localUuid_(localPeerPb_.permanent_uuid()),
+      localHostPort_(
+          localPeerPb_.has_last_known_addr()
+              ? std::make_pair(
+                    localPeerPb_.last_known_addr().host(),
+                    static_cast<unsigned int>(
+                        localPeerPb_.last_known_addr().port()))
+              : std::pair<std::string, unsigned int>{}),
       cmetaManager_(std::move(cmetaManager)),
       persistentVarsManager_(std::move(persistentVarsManager)),
       raftPool_(raftPool),
@@ -4197,7 +4205,7 @@ Status RaftConsensus::refreshConsensusQueueAndPeersUnlocked() {
 }
 
 const string& RaftConsensus::peer_uuid() const {
-  return localPeerPb_.permanent_uuid();
+  return localUuid_;
 }
 
 std::string RaftConsensus::peer_region() const {
@@ -4224,23 +4232,17 @@ std::string RaftConsensus::peer_quorum_id(bool need_lock) const {
 }
 
 std::pair<string, unsigned int> RaftConsensus::peer_hostport() const {
-  if (localPeerPb_.has_last_known_addr()) {
-    const ::kudu::HostPortPB& host_port = localPeerPb_.last_known_addr();
-    std::string host = host_port.host();
-    return std::make_pair(host_port.host(), host_port.port());
-  }
-  return {};
+  return localHostPort_;
 }
 
 bool RaftConsensus::peer_is_standby_member() const {
-  return isStandbyMember(localPeerPb_);
+  const auto published = publishedStatus_.load();
+  return published && published->isStandbyMember;
 }
 
 uint32_t RaftConsensus::peer_standby_start_timestamp() const {
-  return localPeerPb_.has_attrs() &&
-          localPeerPb_.attrs().has_standby_start_timestamp()
-      ? localPeerPb_.attrs().standby_start_timestamp()
-      : 0;
+  const auto published = publishedStatus_.load();
+  return published ? published->standbyStartTimestamp : 0;
 }
 
 const string& RaftConsensus::tablet_id() const {
@@ -6125,6 +6127,10 @@ RaftConsensus::buildStatusSnapshotUnlocked() {
     snapshot->peerQuorumId =
         getQuorumId(localPeerPb_, activeConfig.commit_rule());
   }
+  snapshot->isStandbyMember = isStandbyMember(localPeerPb_);
+  snapshot->standbyStartTimestamp = localPeerPb_.has_attrs()
+      ? localPeerPb_.attrs().standby_start_timestamp()
+      : 0;
   snapshot->quorumType = activeConfig.has_commit_rule() &&
           activeConfig.commit_rule().has_quorum_type()
       ? activeConfig.commit_rule().quorum_type()

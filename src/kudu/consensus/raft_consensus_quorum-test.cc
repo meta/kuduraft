@@ -22,6 +22,7 @@
 // ********************************************************************
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <future>
 #include <memory>
@@ -594,7 +595,26 @@ class RaftConsensusQuorumTest : public KuduTest {
     ASSERT_FALSE(cmeta->hasVotedFor());
   }
 
+  // Makes 'peer' a standby non-voter in its own committed config, the way a
+  // committed MODIFY_PEER does, without replicating the change.
+  Status commitLocalStandbyConfig(RaftConsensus* peer, uint32_t timestamp) {
+    RaftConsensus::LockGuard l(peer->consensusStateLock_);
+    RaftConfigPB config = peer->cmeta_->committedConfig();
+    config.set_opid_index(config.opid_index() + 1);
+    RaftPeerPB* local = nullptr;
+    RETURN_NOT_OK(getRaftConfigMember(&config, peer->peer_uuid(), &local));
+    local->set_member_type(RaftPeerPB::NON_VOTER);
+    local->mutable_attrs()->set_standby_start_timestamp(timestamp);
+    RETURN_NOT_OK(peer->setPendingConfigUnlocked(config));
+    return peer->setCommittedConfigUnlocked(config);
+  }
+
   ~RaftConsensusQuorumTest() {
+    // Shut every peer down before any is destroyed: shutdown() drains the
+    // queue's observer notifications, which call into the RaftConsensus.
+    for (const auto& [_, peer] : peers_->getPeerMapCopy()) {
+      peer->shutdown();
+    }
     peers_->clear();
     // TODO(modernization): Consider std::vector<std::unique_ptr<T>> for
     // automatic cleanup
@@ -1131,6 +1151,41 @@ TEST_F(
   for (const auto& entry : peers_->getPeerMapCopy()) {
     entry.second->shutdown();
   }
+}
+
+// Status variables read the local peer's standby fields without
+// consensusStateLock_ while config changes rewrite the local peer record.
+TEST_F(RaftConsensusQuorumTest, TestLocalPeerStatusReadDuringConfigChange) {
+  constexpr uint32_t kNumChanges = 200;
+  ASSERT_OK(buildAndStartConfig(3));
+  shared_ptr<RaftConsensus> peer;
+  ASSERT_OK(peers_->getPeerByIdx(0, &peer));
+  const auto hostPort = peer->peer_hostport();
+  ASSERT_FALSE(hostPort.first.empty());
+
+  std::atomic<bool> stop{false};
+  std::thread reader([&] {
+    uint32_t lastTimestamp = 0;
+    while (!stop.load(std::memory_order_relaxed)) {
+      const uint32_t timestamp = peer->peer_standby_start_timestamp();
+      EXPECT_GE(timestamp, lastTimestamp);
+      lastTimestamp = timestamp;
+      if (peer->peer_is_standby_member()) {
+        EXPECT_GT(peer->peer_standby_start_timestamp(), 0);
+      }
+      EXPECT_EQ(peer->peer_hostport(), hostPort);
+    }
+  });
+
+  for (uint32_t timestamp = 1; timestamp <= kNumChanges; ++timestamp) {
+    ASSERT_OK(commitLocalStandbyConfig(peer.get(), timestamp));
+  }
+  stop = true;
+  reader.join();
+
+  EXPECT_TRUE(peer->peer_is_standby_member());
+  EXPECT_EQ(peer->peer_standby_start_timestamp(), kNumChanges);
+  EXPECT_EQ(peer->peer_hostport(), hostPort);
 }
 
 TEST_F(RaftConsensusQuorumTest, TestConsensusStopsIfAMajorityFallsBehind) {
