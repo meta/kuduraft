@@ -32,7 +32,6 @@
 #include <openssl/x509v3.h>
 
 #include <fmt/format.h>
-#include <folly/ScopeGuard.h>
 #include "kudu/gutil/basictypes.h"
 #include "kudu/security/ca/cert_management.h"
 #include "kudu/security/cert.h"
@@ -74,7 +73,6 @@
 
 using std::string;
 using std::unique_lock;
-using std::vector;
 
 DEFINE_int32(
     ipki_server_key_size,
@@ -276,6 +274,7 @@ Status TlsContext::useCertificateAndKeyUnlocked(
   OPENSSL_RET_NOT_OK(
       SSL_CTX_use_certificate(ctx_.get(), cert.getTopOfChainX509()),
       "failed to use certificate");
+  updateServerCertCacheUnlocked(cert.getTopOfChainX509());
   OPENSSL_RET_NOT_OK(
       SSL_CTX_use_PrivateKey(ctx_.get(), key.getRawData()),
       "failed to use private key");
@@ -342,85 +341,50 @@ Status TlsContext::addTrustedCertificateUnlocked(
   return Status::OK();
 }
 
-Status TlsContext::dumpCertsInfo(std::vector<std::string>* certsInfo) const {
+Status TlsContext::dumpServerCertInfo(std::string& certInfo) const {
   SCOPED_OPENSSL_NO_PENDING_ERRORS;
-  shared_lock lock(lock_);
-  X509* x509 = SSL_CTX_get0_certificate(ctx_.get());
-
-  RETURN_NOT_OK(dumpTrustedCertsUnlocked(/*derOrStr = */ false, certsInfo));
-
-  if (x509) {
-    std::string fields;
-    dumpCertFieldsUnlocked(x509, &fields);
-    certsInfo->push_back(fields);
+  auto cache = serverCertCache_.rlock();
+  if (!cache->cert) {
+    return Status::NotFound("no server certificate");
   }
 
-  return Status::OK();
-}
+  int remainingDaysAfter = 0, remainingSecondsAfter = 0;
+  ASN1_TIME_diff(
+      &remainingDaysAfter,
+      &remainingSecondsAfter,
+      nullptr,
+      X509_get0_notAfter(cache->cert.get()));
+  int remainingDaysBefore = 0, remainingSecondsBefore = 0;
+  ASN1_TIME_diff(
+      &remainingDaysBefore,
+      &remainingSecondsBefore,
+      nullptr,
+      X509_get0_notBefore(cache->cert.get()));
 
-void TlsContext::dumpCertFieldsUnlocked(X509* x509, std::string* certDetails) {
-  const ASN1_TIME* notAfter = X509_get0_notAfter(x509);
-  int remainingDaysA = 0, remainingSecondsA = 0;
-  ASN1_TIME_diff(&remainingDaysA, &remainingSecondsA, nullptr, notAfter);
-
-  const ASN1_TIME* notBefore = X509_get0_notBefore(x509);
-  int remainingDaysB = 0, remainingSecondsB = 0;
-  ASN1_TIME_diff(&remainingDaysB, &remainingSecondsB, nullptr, notBefore);
-
-  *certDetails = fmt::format(
+  certInfo = fmt::format(
       "CERT subject={}, issuer={}, notAfterDays={}, notAfterSeconds={},"
       " notBeforeDays={}, notBeforeSeconds={}",
-      x509NameToString(X509_get_subject_name(x509)),
-      x509NameToString(X509_get_issuer_name(x509)),
-      remainingDaysA,
-      remainingSecondsA,
-      remainingDaysB,
-      remainingSecondsB);
+      cache->subject,
+      cache->issuer,
+      remainingDaysAfter,
+      remainingSecondsAfter,
+      remainingDaysBefore,
+      remainingSecondsBefore);
+  return Status::OK();
 }
 
-Status TlsContext::dumpTrustedCertsUnlocked(
-    bool derOrStr,
-    vector<string>* certDers) const {
-  vector<string> ret;
-  auto* certStore = SSL_CTX_get_cert_store(ctx_.get());
+// Called on cert load/refresh to populate the cached info
+// needed by dumpServerCertInfo
+void TlsContext::updateServerCertCacheUnlocked(X509* x509) {
+  X509_up_ref(x509);
+  CUniquePtr<X509> cert{x509, &X509_free};
+  std::string subject = x509NameToString(X509_get_subject_name(x509));
+  std::string issuer = x509NameToString(X509_get_issuer_name(x509));
 
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
-#error "OpenSSL < 1.1.0 - need to update"
-#else
-#define STORE_LOCK(CS) \
-  CHECK_EQ(1, X509_STORE_lock(CS)) << "Could not lock certificate store"
-#define STORE_UNLOCK(CS) \
-  CHECK_EQ(1, X509_STORE_unlock(CS)) << "Could not unlock certificate store"
-#define STORE_GET_X509_OBJS(CS) X509_STORE_get0_objects(CS)
-#define X509_OBJ_GET_TYPE(X509_OBJ) X509_OBJECT_get_type(X509_OBJ)
-#define X509_OBJ_GET_X509(X509_OBJ) X509_OBJECT_get0_X509(X509_OBJ)
-#endif
-
-  STORE_LOCK(certStore);
-  auto unlock = folly::makeGuard([&]() { STORE_UNLOCK(certStore); });
-  auto* objects = STORE_GET_X509_OBJS(certStore);
-  int numObjects = sk_X509_OBJECT_num(objects);
-  for (int i = 0; i < numObjects; i++) {
-    auto* obj = sk_X509_OBJECT_value(objects, i);
-    if (X509_OBJ_GET_TYPE(obj) != X509_LU_X509) {
-      continue;
-    }
-    auto* x509 = X509_OBJ_GET_X509(obj);
-    if (derOrStr) {
-      Cert c;
-      c.adoptAndAddRefX509(x509);
-      string der;
-      RETURN_NOT_OK(c.toString(&der, DataFormat::Der));
-      ret.emplace_back(std::move(der));
-    } else {
-      string fields;
-      dumpCertFieldsUnlocked(x509, &fields);
-      ret.emplace_back(std::move(fields));
-    }
-  }
-
-  certDers->swap(ret);
-  return Status::OK();
+  auto cache = serverCertCache_.wlock();
+  cache->cert = std::move(cert);
+  cache->subject = std::move(subject);
+  cache->issuer = std::move(issuer);
 }
 
 namespace {
@@ -495,6 +459,7 @@ Status TlsContext::generateSelfSignedCertAndKey() {
   OPENSSL_RET_NOT_OK(
       SSL_CTX_use_certificate(ctx_.get(), cert.getTopOfChainX509()),
       "failed to use certificate");
+  updateServerCertCacheUnlocked(cert.getTopOfChainX509());
   hasCert_ = true;
   csr_ = std::move(csr);
   return Status::OK();
@@ -538,6 +503,7 @@ Status TlsContext::adoptSignedCert(const Cert& cert) {
   OPENSSL_RET_NOT_OK(
       SSL_CTX_use_certificate(ctx_.get(), cert.getTopOfChainX509()),
       "failed to use certificate");
+  updateServerCertCacheUnlocked(cert.getTopOfChainX509());
 
   // This should never fail since we already compared the cert's public key
   // against the CSR, but better safe than sorry. If this *does* fail, it

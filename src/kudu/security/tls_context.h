@@ -24,6 +24,7 @@
 #include <optional>
 
 #include <folly/SharedMutex.h>
+#include <folly/Synchronized.h>
 #include "kudu/gutil/port.h"
 
 namespace kudu {
@@ -134,22 +135,12 @@ class TlsContext {
   // therefore callable from outside.
   Status addTrustedCertificate(const Cert& c) WARN_UNUSED_RESULT;
 
-  // Dump all of the certs that are currently trusted by this context, in DER
-  // form, into 'certDers'.
-  // @param derOrStr = true, dump the certificate into DER format
-  // @param derOrStr = false, dump some fields of the certificate
-  // for debugging.
-  Status dumpTrustedCertsUnlocked(
-      bool derOrStr,
-      std::vector<std::string>* certDers) const WARN_UNUSED_RESULT;
-
-  // Dump all the certs in SSL context. This includes both the CA
-  // certificates and the servers cert
-  // certsInfo : All the certificates in SSL dumped.
-  Status dumpCertsInfo(std::vector<std::string>* certsInfo) const;
-
-  // Static helper function to dump Issuer, Subject and Validity times.
-  static void dumpCertFieldsUnlocked(X509* x509, std::string* certDetails);
+  // Dumps only this context's own cert as "CERT subject=..., issuer=...,
+  // notAfterDays=..., notAfterSeconds=..., notBeforeDays=...,
+  // notBeforeSeconds=...". The subject and issuer are formatted once when the
+  // cert is installed; the validity times are computed against the current time
+  // on each call. Returns NotFound when the context has no cert.
+  Status dumpServerCertInfo(std::string& certInfo) const;
 
   // Uses 'cert' and 'key' as the cert and key for use with TLS connections.
   //
@@ -239,6 +230,10 @@ class TlsContext {
  private:
   Status verifyCertChainUnlocked(const Cert& cert) WARN_UNUSED_RESULT;
 
+  // Refreshes serverCertCache_ for 'x509', the cert just installed with
+  // SSL_CTX_use_certificate().
+  void updateServerCertCacheUnlocked(X509* x509);
+
   // Set ALPN protocols. ALPN is a mechanism to multiplex multiple protocols on
   // the same server. And enforcing the protocol match between the client and
   // the server can prevent the cross protocol attack. See
@@ -276,6 +271,15 @@ class TlsContext {
 
   // alpn protocols in wire format
   std::vector<unsigned char> serverAlpns_;
+
+  // Cache of dumpServerCertInfo(), set whenever a cert is installed. It holds
+  // its own reference to the cert, so it is read without taking lock_.
+  struct ServerCertCache {
+    CUniquePtr<X509> cert{nullptr, &X509_free};
+    std::string subject;
+    std::string issuer;
+  };
+  mutable folly::Synchronized<ServerCertCache> serverCertCache_;
 };
 
 } // namespace security
