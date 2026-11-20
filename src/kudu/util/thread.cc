@@ -30,7 +30,6 @@
 #include <cstring>
 #include <map>
 #include <memory>
-#include <sstream>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -43,8 +42,6 @@
 
 #include <fmt/format.h>
 #include "kudu/gutil/atomicops.h"
-#include "kudu/gutil/bind.h"
-#include "kudu/gutil/bind_helpers.h"
 #include "kudu/gutil/dynamic_annotations.h"
 #include "kudu/gutil/mathlimits.h"
 #include "kudu/gutil/port.h"
@@ -55,18 +52,11 @@
 #include "kudu/util/metrics.h"
 #include "kudu/util/monotime.h"
 #include "kudu/util/mutex.h"
-#include "kudu/util/os-util.h"
 #include "kudu/util/status.h"
 #include "kudu/util/stopwatch.h"
 #include "kudu/util/trace.h"
-#include "kudu/util/url-coding.h"
-#include "kudu/util/web_callback_registry.h"
 
-using boost::bind;
-using boost::mem_fn;
-using std::endl;
 using std::map;
-using std::ostringstream;
 using std::shared_ptr;
 using std::string;
 using std::vector;
@@ -123,10 +113,6 @@ class ThreadMgr {
 
   static void setThreadName(const std::string& name, int64_t tid);
 
-  Status startInstrumentation(
-      const std::shared_ptr<MetricEntity>& metrics,
-      WebCallbackRegistry* web);
-
   // Registers a thread to the supplied category. The key is a pthread_t,
   // not the system TID, since pthread_t is less prone to being recycled.
   void addThread(
@@ -167,18 +153,6 @@ class ThreadMgr {
   // current number of running threads.
   uint64_t threadsStartedMetric_;
   uint64_t threadsRunningMetric_;
-
-  // Metric callbacks.
-  uint64_t readThreadsStarted();
-  uint64_t readThreadsRunning();
-
-  // Webpage callback; prints all threads by category.
-  void threadPathHandler(
-      const WebCallbackRegistry::WebRequest& req,
-      WebCallbackRegistry::PrerenderedWebResponse* resp);
-  void printThreadCategoryRows(
-      const ThreadCategory& category,
-      ostringstream* output);
 };
 
 void ThreadMgr::setThreadName(const string& name, int64_t tid) {
@@ -204,43 +178,6 @@ void ThreadMgr::setThreadName(const string& name, int64_t tid) {
   if (err < 0 && errno != EPERM) {
     PLOG(ERROR) << "setThreadName";
   }
-}
-
-Status ThreadMgr::startInstrumentation(
-    const std::shared_ptr<MetricEntity>& metrics,
-    WebCallbackRegistry* web) {
-  MutexLock l(lock_);
-
-  // Use function gauges here so that we can register a unique copy of these
-  // metrics in multiple tservers, even though the ThreadMgr is itself a
-  // singleton.
-  metrics->neverRetire(METRIC_threads_started.instantiateFunctionGauge(
-      metrics, Bind(&ThreadMgr::readThreadsStarted, unretained(this))));
-  metrics->neverRetire(METRIC_threads_running.instantiateFunctionGauge(
-      metrics, Bind(&ThreadMgr::readThreadsRunning, unretained(this))));
-
-  if (web) {
-    WebCallbackRegistry::PrerenderedPathHandlerCallback threadCallback =
-        boost::bind<void>(mem_fn(&ThreadMgr::threadPathHandler), this, _1, _2);
-    DCHECK_NOTNULL(web)->RegisterPrerenderedPathHandler(
-        "/threadz",
-        "Threads",
-        threadCallback,
-        true /* is_styled*/,
-        true /* is_on_nav_bar */);
-  }
-
-  return Status::OK();
-}
-
-uint64_t ThreadMgr::readThreadsStarted() {
-  MutexLock l(lock_);
-  return threadsStartedMetric_;
-}
-
-uint64_t ThreadMgr::readThreadsRunning() {
-  MutexLock l(lock_);
-  return threadsRunningMetric_;
 }
 
 void ThreadMgr::addThread(
@@ -295,76 +232,6 @@ void ThreadMgr::removeThread(
   STATS_threadsRunning.addValue(running, KUDU_STATS_TAG);
   KUDU_ANNONTATE_IGNORE_SYNC_END();
   KUDU_ANNONTATE_IGNORE_READS_AND_WRITES_END();
-}
-
-void ThreadMgr::printThreadCategoryRows(
-    const ThreadCategory& category,
-    ostringstream* output) {
-  for (const ThreadCategory::value_type& thread : category) {
-    ThreadStats stats;
-    Status status = getThreadStats(thread.second.threadId(), &stats);
-    if (!status.ok()) {
-      KLOG_EVERY_N(INFO, 100)
-          << "Could not get per-thread statistics: " << status.ToString();
-    }
-    (*output) << "<tr><td>" << thread.second.name() << "</td><td>"
-              << (static_cast<double>(stats.userNs) / 1e9) << "</td><td>"
-              << (static_cast<double>(stats.kernelNs) / 1e9) << "</td><td>"
-              << (static_cast<double>(stats.iowaitNs) / 1e9) << "</td></tr>";
-  }
-}
-
-void ThreadMgr::threadPathHandler(
-    const WebCallbackRegistry::WebRequest& req,
-    WebCallbackRegistry::PrerenderedWebResponse* resp) {
-  ostringstream* output = resp->output;
-  MutexLock l(lock_);
-  vector<const ThreadCategory*> categoriesToPrint;
-  auto categoryName = req.parsed_args.find("group");
-  if (categoryName != req.parsed_args.end()) {
-    string group = escapeForHtmlToString(categoryName->second);
-    (*output) << "<h2>Thread Group: " << group << "</h2>" << endl;
-    if (group != "all") {
-      ThreadCategoryMap::const_iterator category =
-          threadCategories_.find(group);
-      if (category == threadCategories_.end()) {
-        (*output) << "Thread group '" << group << "' not found" << endl;
-        return;
-      }
-      categoriesToPrint.push_back(&category->second);
-      (*output) << "<h3>" << category->first << " : " << category->second.size()
-                << "</h3>";
-    } else {
-      for (const ThreadCategoryMap::value_type& category : threadCategories_) {
-        categoriesToPrint.push_back(&category.second);
-      }
-      (*output) << "<h3>All Threads : </h3>";
-    }
-
-    (*output) << "<table class='table table-hover table-border'>";
-    (*output)
-        << "<thead><tr><th>Thread name</th><th>Cumulative User CPU(s)</th>"
-        << "<th>Cumulative Kernel CPU(s)</th>"
-        << "<th>Cumulative IO-wait(s)</th></tr></thead>";
-    (*output) << "<tbody>\n";
-
-    for (const ThreadCategory* category : categoriesToPrint) {
-      printThreadCategoryRows(*category, output);
-    }
-    (*output) << "</tbody></table>";
-  } else {
-    (*output) << "<h2>Thread Groups</h2>";
-    (*output) << "<h4>" << threadsRunningMetric_ << " thread(s) running";
-    (*output) << "<a href='/threadz?group=all'><h3>All Threads</h3>";
-
-    for (const ThreadCategoryMap::value_type& category : threadCategories_) {
-      string categoryArg;
-      urlEncode(category.first, &categoryArg);
-      (*output) << "<a href='/threadz?group=" << categoryArg << "'><h3>"
-                << category.first << " : " << category.second.size()
-                << "</h3></a>";
-    }
-  }
 }
 
 static void initThreading() {
