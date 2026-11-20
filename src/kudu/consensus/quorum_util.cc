@@ -43,9 +43,11 @@ DEFINE_bool(
     raft_reject_standby_voter,
     false,
     "Reject a Raft configuration with a VOTER that is also a standby member. "
-    "Enable only after confirming that no committed configuration has one: "
-    "the check also runs when consensus metadata is flushed, and a failed "
-    "flush crashes the server.");
+    "Enable only after every member of the ring runs a build with this flag "
+    "and no committed or pending configuration has one. The check runs on "
+    "most paths that load, change or persist a configuration, including "
+    "startup log replay, so an existing bad configuration can stall "
+    "replication, block a restart or crash the server.");
 
 using google::protobuf::RepeatedPtrField;
 using kudu::pb_util::SecureDebugString;
