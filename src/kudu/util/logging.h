@@ -17,6 +17,8 @@
 #ifndef KUDU_UTIL_LOGGING_H
 #define KUDU_UTIL_LOGGING_H
 
+#include <atomic>
+#include <cstdint>
 #include <iosfwd>
 #include <string>
 
@@ -171,40 +173,37 @@ enum PrivateThrottleMsg { kThrottleMsg };
 } // namespace kudu
 
 ////////////////////////////////////////////////////////////////////////////////
-// Versions of glog macros for "LOG_EVERY" and "LOG_FIRST" that annotate the
-// benign races on their internal static variables.
+// Versions of glog macros for "LOG_EVERY" and "LOG_FIRST" whose occurrence
+// counters are atomic, so they may be used from several threads at once.
 ////////////////////////////////////////////////////////////////////////////////
 
 // The "base" macros.
-#define KUDU_SOME_KIND_OF_LOG_EVERY_N(severity, n, what_to_do)   \
-  static int LOG_OCCURRENCES = 0, LOG_OCCURRENCES_MOD_N = 0;     \
-  KUDU_ANNONTATE_BENIGN_RACE(                                    \
-      &LOG_OCCURRENCES, "Logging every N is approximate");       \
-  KUDU_ANNONTATE_BENIGN_RACE(                                    \
-      &LOG_OCCURRENCES_MOD_N, "Logging every N is approximate"); \
-  ++LOG_OCCURRENCES;                                             \
-  if (++LOG_OCCURRENCES_MOD_N > (n))                             \
-    LOG_OCCURRENCES_MOD_N -= (n);                                \
-  if (LOG_OCCURRENCES_MOD_N == 1)                                \
-  google::LogMessage(                                            \
-      __FILE__,                                                  \
-      __LINE__,                                                  \
-      google::GLOG_##severity,                                   \
-      LOG_OCCURRENCES,                                           \
-      &what_to_do) /*NOLINT(bugprone-macro-parentheses)*/        \
+// Logs occurrences 1, n + 1, 2n + 1, ... of this statement.
+#define KUDU_SOME_KIND_OF_LOG_EVERY_N(severity, n, what_to_do)     \
+  static std::atomic<uint64_t> LOG_OCCURRENCES{0};                 \
+  if (const uint64_t VARNAME_LINENUM(occurrence) =                 \
+          LOG_OCCURRENCES.fetch_add(1, std::memory_order_relaxed); \
+      VARNAME_LINENUM(occurrence) % static_cast<uint64_t>(n) == 0) \
+  google::LogMessage(                                              \
+      __FILE__,                                                    \
+      __LINE__,                                                    \
+      google::GLOG_##severity,                                     \
+      static_cast<int>(VARNAME_LINENUM(occurrence) + 1),           \
+      &what_to_do) /*NOLINT(bugprone-macro-parentheses)*/          \
       .stream()
 
-#define KUDU_SOME_KIND_OF_LOG_FIRST_N(severity, n, what_to_do) \
-  static uint64_t LOG_OCCURRENCES = 0;                         \
-  KUDU_ANNONTATE_BENIGN_RACE(                                  \
-      &LOG_OCCURRENCES, "Logging the first N is approximate"); \
-  if (LOG_OCCURRENCES++ < (n))                                 \
-  google::LogMessage(                                          \
-      __FILE__,                                                \
-      __LINE__,                                                \
-      google::GLOG_##severity,                                 \
-      LOG_OCCURRENCES,                                         \
-      &what_to_do) /*NOLINT(bugprone-macro-parentheses)*/      \
+// Logs the first n occurrences of this statement.
+#define KUDU_SOME_KIND_OF_LOG_FIRST_N(severity, n, what_to_do)     \
+  static std::atomic<uint64_t> LOG_OCCURRENCES{0};                 \
+  if (const uint64_t VARNAME_LINENUM(occurrence) =                 \
+          LOG_OCCURRENCES.fetch_add(1, std::memory_order_relaxed); \
+      VARNAME_LINENUM(occurrence) < static_cast<uint64_t>(n))      \
+  google::LogMessage(                                              \
+      __FILE__,                                                    \
+      __LINE__,                                                    \
+      google::GLOG_##severity,                                     \
+      static_cast<int>(VARNAME_LINENUM(occurrence) + 1),           \
+      &what_to_do) /*NOLINT(bugprone-macro-parentheses)*/          \
       .stream()
 
 // The direct user-facing macros.
@@ -253,40 +252,41 @@ namespace logging {
 // This is used internally by KLOG_EVERY_N_SECS, but can also be used
 // explicitly in conjunction with KLOG_EVERY_N_SECS_THROTTLER. See the
 // macro descriptions above for details.
+//
+// shouldLog() may be called from several threads at once. Throttling is
+// approximate: concurrent callers may both log, or miscount the suppressed
+// messages. The fields are relaxed atomics only so that every access is
+// well-defined; they order nothing else.
 class LogThrottler {
  public:
-  LogThrottler() : numSuppressed_(0), lastTs_(0), lastTag_(nullptr) {
-    KUDU_ANNONTATE_BENIGN_RACE_SIZED(
-        this, sizeof(*this), "OK to be sloppy with log throttling");
-  }
-
-  bool shouldLog(int nSecs, const char* tag, int* numSuppressed) {
-    kudu::MicrosecondsInt64 ts = getMonoTimeMicros();
+  [[nodiscard]] bool shouldLog(int nSecs, const char* tag, int* numSuppressed) {
+    const kudu::MicrosecondsInt64 ts = getMonoTimeMicros();
 
     // When we switch tags, we should not show the "suppressed" messages,
     // because in fact it's a different message that we skipped. So, reset it to
     // zero, and always log the new message.
-    if (tag != lastTag_) {
-      *numSuppressed = numSuppressed_ = 0;
-      lastTag_ = tag;
-      lastTs_ = ts;
+    if (tag != lastTag_.load(std::memory_order_relaxed)) {
+      numSuppressed_.store(0, std::memory_order_relaxed);
+      *numSuppressed = 0;
+      lastTag_.store(tag, std::memory_order_relaxed);
+      lastTs_.store(ts, std::memory_order_relaxed);
       return true;
     }
 
-    if (ts - lastTs_ < nSecs * 1000000) {
+    if (ts - lastTs_.load(std::memory_order_relaxed) < nSecs * 1000000) {
       *numSuppressed =
-          base::subtle::noBarrierAtomicIncrement(&numSuppressed_, 1);
+          numSuppressed_.fetch_add(1, std::memory_order_relaxed) + 1;
       return false;
     }
-    lastTs_ = ts;
-    *numSuppressed = base::subtle::noBarrierAtomicExchange(&numSuppressed_, 0);
+    lastTs_.store(ts, std::memory_order_relaxed);
+    *numSuppressed = numSuppressed_.exchange(0, std::memory_order_relaxed);
     return true;
   }
 
  private:
-  Atomic32 numSuppressed_;
-  kudu::MicrosecondsInt64 lastTs_;
-  const char* lastTag_;
+  std::atomic<int32_t> numSuppressed_{0};
+  std::atomic<kudu::MicrosecondsInt64> lastTs_{0};
+  std::atomic<const char*> lastTag_{nullptr};
 };
 } // namespace logging
 
