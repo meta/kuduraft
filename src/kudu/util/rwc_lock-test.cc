@@ -21,9 +21,9 @@
 #include <thread>
 #include <vector>
 
-#include <folly/synchronization/test/Barrier.h>
 #include <glog/logging.h>
 #include <gtest/gtest.h>
+#include <barrier>
 
 #include "kudu/gutil/atomicops.h"
 #include "kudu/util/locks.h"
@@ -143,7 +143,7 @@ TEST_F(RwcLockTest, TestCorrectBehavior) {
 // This is critical for the copy-on-write pattern used in routing tables.
 TEST_F(RwcLockTest, WriteLockDoesNotBlockReaders) {
   RwcLock lock;
-  folly::test::Barrier barrier(2);
+  std::barrier barrier(2);
   std::atomic<bool> readerAcquired{false};
   std::atomic<bool> writerDone{false};
 
@@ -152,10 +152,10 @@ TEST_F(RwcLockTest, WriteLockDoesNotBlockReaders) {
     lock.writeLock();
 
     // Signal writer has acquired writeLock
-    barrier.wait();
+    barrier.arrive_and_wait();
 
     // Wait for reader to verify it can acquire readLock
-    barrier.wait();
+    barrier.arrive_and_wait();
 
     writerDone = true;
     lock.writeUnlock();
@@ -165,7 +165,7 @@ TEST_F(RwcLockTest, WriteLockDoesNotBlockReaders) {
   // writeLock
   std::thread reader([&]() {
     // Wait for writer to acquire writeLock
-    barrier.wait();
+    barrier.arrive_and_wait();
 
     lock.readLock();
     readerAcquired = true;
@@ -176,7 +176,7 @@ TEST_F(RwcLockTest, WriteLockDoesNotBlockReaders) {
     lock.readUnlock();
 
     // Signal reader is done
-    barrier.wait();
+    barrier.arrive_and_wait();
   });
 
   reader.join();
@@ -189,7 +189,7 @@ TEST_F(RwcLockTest, WriteLockDoesNotBlockReaders) {
 // Test that commitLock (exclusive lock) blocks readers.
 TEST_F(RwcLockTest, CommitLockBlocksReaders) {
   RwcLock lock;
-  folly::test::Barrier barrier(2);
+  std::barrier barrier(2);
   std::atomic<bool> readerAcquired{false};
   std::atomic<bool> committerDone{false};
 
@@ -199,10 +199,10 @@ TEST_F(RwcLockTest, CommitLockBlocksReaders) {
     lock.upgradeToCommitLock();
 
     // Signal committer has acquired commitLock
-    barrier.wait();
+    barrier.arrive_and_wait();
 
     // Wait for reader to attempt to acquire (reader will block)
-    barrier.wait();
+    barrier.arrive_and_wait();
 
     committerDone = true;
     lock.commitUnlock();
@@ -211,10 +211,10 @@ TEST_F(RwcLockTest, CommitLockBlocksReaders) {
   // Reader thread should block until committer releases
   std::thread reader([&]() {
     // Wait for committer to acquire commitLock
-    barrier.wait();
+    barrier.arrive_and_wait();
 
     // Signal that reader is about to attempt lock acquisition
-    barrier.wait();
+    barrier.arrive_and_wait();
 
     // This will block until committer releases
     lock.readLock();
@@ -238,14 +238,14 @@ TEST_F(RwcLockTest, OnlyOneWriterAllowed) {
   std::atomic<int> concurrentWriters{0};
   std::atomic<int> maxConcurrentWriters{0};
   const int kNumWriters = 5;
-  folly::test::Barrier barrier(kNumWriters);
+  std::barrier barrier(kNumWriters);
 
   std::vector<std::thread> writers;
 
   for (int i = 0; i < kNumWriters; i++) {
     writers.emplace_back([&]() {
       // Wait for all threads to be ready
-      barrier.wait();
+      barrier.arrive_and_wait();
 
       lock.writeLock();
 
