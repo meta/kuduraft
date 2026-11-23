@@ -14,14 +14,16 @@
 using std::string;
 
 string stripPrefixString(StringPiece str, const StringPiece& prefix) {
-  if (str.startsWith(prefix))
+  if (str.startsWith(prefix)) {
     str.removePrefix(prefix.length());
+  }
   return str.asString();
 }
 
 string stripSuffixString(StringPiece str, const StringPiece& suffix) {
-  if (str.endsWith(suffix))
+  if (str.endsWith(suffix)) {
     str.removeSuffix(suffix.length());
+  }
   return str.asString();
 }
 
@@ -30,8 +32,9 @@ bool tryStripSuffixString(
     const StringPiece& suffix,
     string* result) {
   const bool hasSuffix = str.endsWith(suffix);
-  if (hasSuffix)
+  if (hasSuffix) {
     str.removeSuffix(suffix.length());
+  }
   str.asString().swap(*result);
   return hasSuffix;
 }
@@ -67,10 +70,11 @@ void StripWhiteSpace(const char** str, int* len) {
 
 bool StripTrailingNewline(string* s) {
   if (!s->empty() && (*s)[s->size() - 1] == '\n') {
-    if (s->size() > 1 && (*s)[s->size() - 2] == '\r')
+    if (s->size() > 1 && (*s)[s->size() - 2] == '\r') {
       s->resize(s->size() - 2);
-    else
+    } else {
       s->resize(s->size() - 1);
+    }
     return true;
   }
   return false;
@@ -112,8 +116,9 @@ void StripWhiteSpace(string* str) {
 //    Return the number of characters removed
 // ----------------------------------------------------------------------
 int stripDupCharacters(string* s, char dupChar, int startPos) {
-  if (startPos < 0)
+  if (startPos < 0) {
     startPos = 0;
+  }
 
   // remove dups by compaction in-place
   int inputPos = startPos; // current reader position
@@ -122,14 +127,16 @@ int stripDupCharacters(string* s, char dupChar, int startPos) {
   while (inputPos < inputEnd) {
     // keep current character
     const char currChar = (*s)[inputPos];
-    if (outputPos != inputPos) // must copy
+    if (outputPos != inputPos) { // must copy
       (*s)[outputPos] = currChar;
+    }
     ++inputPos;
     ++outputPos;
 
     if (currChar == dupChar) { // skip subsequent dups
-      while ((inputPos < inputEnd) && ((*s)[inputPos] == dupChar))
+      while ((inputPos < inputEnd) && ((*s)[inputPos] == dupChar)) {
         ++inputPos;
+      }
     }
   }
   const int numDeleted = inputPos - outputPos;
