@@ -144,15 +144,6 @@ class BitmapIterator {
   BitmapIterator(const uint8_t* map, size_t numBits)
       : offset_(0), numBits_(numBits), map_(map) {}
 
-  bool done() const {
-    return (numBits_ - offset_) == 0;
-  }
-
-  void seekTo(size_t bit) {
-    DCHECK_LE(bit, numBits_);
-    offset_ = bit;
-  }
-
   size_t next(bool* value) {
     size_t len = numBits_ - offset_;
     if (PREDICT_FALSE(len == 0)) {
