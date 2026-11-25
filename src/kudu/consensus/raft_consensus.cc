@@ -1146,6 +1146,18 @@ PeerMessageQueue::LeaderReadSnapshot RaftConsensus::getLeaderReadSnapshot()
   return queue_->getLeaderReadSnapshot();
 }
 
+namespace {
+// The decision before Start(), when there is no admission state to consult.
+AdmissionDecision admissionBeforeStart() {
+  if (!datalossBoundMeasurementRequested()) {
+    return AdmissionDecision{.admitted = true};
+  }
+  return AdmissionDecision{
+      .admitted = !datalossBoundFailsClosed(),
+      .reason = DatalossBoundReason::InternalError};
+}
+} // namespace
+
 AdmissionDecision RaftConsensus::admitProtectedWrite(
     int64_t ops,
     int64_t bytes) {
@@ -1153,15 +1165,19 @@ AdmissionDecision RaftConsensus::admitProtectedWrite(
   // DatalossBoundGuard protects admission state with its own lock.
   PeerMessageQueue* queue = statusQueue_.load(std::memory_order_acquire);
   if (queue == nullptr) {
-    // Before Start() there is no admission state to consult.
-    AdmissionDecision decision;
-    if (datalossBoundMeasurementRequested()) {
-      decision.admitted = !datalossBoundFailsClosed();
-      decision.reason = DatalossBoundReason::InternalError;
-    }
-    return decision;
+    return admissionBeforeStart();
   }
   return queue->admitProtectedWrite(ops, bytes);
+}
+
+AdmissionDecision RaftConsensus::probeProtectedWrite(
+    int64_t ops,
+    int64_t bytes) {
+  PeerMessageQueue* queue = statusQueue_.load(std::memory_order_acquire);
+  if (queue == nullptr) {
+    return admissionBeforeStart();
+  }
+  return queue->probeProtectedWrite(ops, bytes);
 }
 
 void RaftConsensus::releaseProtectedWriteReservation(

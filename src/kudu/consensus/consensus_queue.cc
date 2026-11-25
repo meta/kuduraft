@@ -1241,9 +1241,19 @@ AdmissionDecision PeerMessageQueue::admitProtectedWrite(
     int64_t bytes) {
   const auto config = datalossBoundConfig();
   if (!config.isMeasuring) {
-    return AdmissionDecision{};
+    return AdmissionDecision{.admitted = true};
   }
   return datalossBoundGuard_.admit(config, ops, bytes);
+}
+
+AdmissionDecision PeerMessageQueue::probeProtectedWrite(
+    int64_t ops,
+    int64_t bytes) const {
+  const auto config = datalossBoundConfig();
+  if (!config.isMeasuring) {
+    return AdmissionDecision{.admitted = true};
+  }
+  return datalossBoundGuard_.probe(config, ops, bytes);
 }
 
 void PeerMessageQueue::releaseProtectedWriteReservation(

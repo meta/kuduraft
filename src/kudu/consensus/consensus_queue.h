@@ -874,6 +874,13 @@ class PeerMessageQueue {
   [[nodiscard]] AdmissionDecision admitProtectedWrite(
       int64_t ops,
       int64_t bytes);
+
+  // What admitProtectedWrite would decide for the same write now. Reserves
+  // nothing and records nothing.
+  [[nodiscard]] AdmissionDecision probeProtectedWrite(
+      int64_t ops,
+      int64_t bytes) const;
+
   // Releases exactly what admitProtectedWrite reserved for 'reservation'; a
   // no-op unless reservation.reserved.
   void releaseProtectedWriteReservation(const AdmissionDecision& reservation);

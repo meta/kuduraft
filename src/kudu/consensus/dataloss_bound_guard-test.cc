@@ -253,6 +253,54 @@ TEST(DatalossBoundGuardTest, LatestRefusalReplacesTheRecordedOne) {
   EXPECT_EQ(guard->health(config).status, DatalossBoundStatus::Ok);
 }
 
+// A probe decides as admission would, and changes nothing: it reserves no
+// capacity, holds no violation and counts no decision.
+TEST(DatalossBoundGuardTest, ProbeDecidesWithoutEffects) {
+  auto guard = remoteBehind(99, 0);
+  Config config = failClosed();
+  config.refusalHoldMs = 60000;
+  const auto rejected = decisionCounter("rejected", "op_limit");
+  const auto admitted = decisionCounter("admitted", "none");
+  const auto rejectedBefore = readCounter(rejected);
+  const auto admittedBefore = readCounter(admitted);
+
+  const auto refused = guard->probe(config, 1, 1);
+  EXPECT_FALSE(refused.admitted);
+  EXPECT_FALSE(refused.reserved);
+  EXPECT_EQ(refused.reason, DatalossBoundReason::OpLimit);
+  EXPECT_EQ(guard->health(config).status, DatalossBoundStatus::Ok);
+
+  const auto wouldReject = guard->probe(failOpen(), 1, 1);
+  EXPECT_TRUE(wouldReject.admitted);
+  EXPECT_EQ(wouldReject.reason, DatalossBoundReason::OpLimit);
+
+  config.maxOps = 101;
+  const auto fits = guard->probe(config, 1, 1);
+  EXPECT_TRUE(fits.admitted);
+  EXPECT_FALSE(fits.reserved);
+  EXPECT_EQ(guard->health(config).reservedOps, 0);
+
+  EXPECT_EQ(readCounter(rejected), rejectedBefore);
+  EXPECT_EQ(readCounter(admitted), admittedBefore);
+
+  guard->becomeFollower();
+  const auto follower = guard->probe(failClosed(), 1, 1);
+  EXPECT_TRUE(follower.admitted);
+  EXPECT_EQ(follower.reason, DatalossBoundReason::None);
+}
+
+// A refused probe leaves the refusal admission recorded.
+TEST(DatalossBoundGuardTest, ProbeKeepsTheRecordedRefusal) {
+  auto guard = remoteBehind(0, 9000);
+  Config config = failClosed();
+  config.refusalHoldMs = 60000;
+  EXPECT_FALSE(guard->admit(config, 1, 2000).admitted);
+  EXPECT_FALSE(guard->probe(config, 1, 1500).admitted);
+  // The probed write would now fit; the refused one would not.
+  config.maxBytes = 10600;
+  EXPECT_EQ(guard->health(config).reason, DatalossBoundReason::ByteLimit);
+}
+
 // A write the budget cannot hold says nothing about the lag.
 TEST(DatalossBoundGuardTest, OversizedWriteDoesNotHold) {
   auto guard = remoteBehind(0, 0);

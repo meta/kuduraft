@@ -289,6 +289,11 @@ class DatalossBoundGuard {
   [[nodiscard]] AdmissionDecision
   admit(const Config& config, int64_t ops, int64_t bytes);
 
+  // What admit() would decide for the same write now, without its effects: it
+  // reserves nothing, leaves the refusal hold alone and counts no decision.
+  [[nodiscard]] AdmissionDecision
+  probe(const Config& config, int64_t ops, int64_t bytes) const;
+
   // Releases exactly what admit() reserved for 'reservation'; a no-op unless
   // reservation.reserved. Call exactly once per reservation, after the write
   // reaches the log or definitively aborts. A second release drives the
@@ -323,6 +328,11 @@ class DatalossBoundGuard {
       const Config& config,
       int64_t proposedOps,
       int64_t proposedBytes) const;
+
+  // Whether 'health' admits a protected write, and why it would not.
+  [[nodiscard]] static AdmissionDecision decide(
+      const Config& config,
+      const DatalossBoundHealth& health);
 
   // Promotes a confirmed pending watermark, then records the next one at the
   // tail. Caller holds admissionLock_, and queueLock_ so the tail and byte

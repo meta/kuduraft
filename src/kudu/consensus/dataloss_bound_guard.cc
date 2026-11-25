@@ -386,7 +386,10 @@ DatalossBoundHealth DatalossBoundGuard::evaluateUnlocked(
   }
 
   const auto budget = totalBudget(config);
-  if (reservedOps < 0 || reservedBytes < 0) {
+  // A negative proposal is a caller bug, and a negative reservation means
+  // releases outran admissions. Neither can be measured against the budget.
+  if (proposedOps < 0 || proposedBytes < 0 || reservedOps < 0 ||
+      reservedBytes < 0) {
     health.status = DatalossBoundStatus::Violation;
     health.reason = DatalossBoundReason::InternalError;
     return health;
@@ -484,48 +487,51 @@ DatalossBoundHealth DatalossBoundGuard::evaluateUnlocked(
   return health;
 }
 
+AdmissionDecision DatalossBoundGuard::decide(
+    const Config& config,
+    const DatalossBoundHealth& health) {
+  if (health.reason == DatalossBoundReason::NotLeader) {
+    return AdmissionDecision{.admitted = true};
+  }
+  return AdmissionDecision{
+      .admitted = !(
+          config.failClosed && health.status == DatalossBoundStatus::Violation),
+      .reason = health.reason};
+}
+
 AdmissionDecision
 DatalossBoundGuard::admit(const Config& config, int64_t ops, int64_t bytes) {
   AdmissionDecision decision;
   DatalossBoundHealth health;
   const auto budget = totalBudget(config);
-  const bool invalidProposal = ops < 0 || bytes < 0;
-  // Reserve at most the budget. A write at or past it is a violation
-  // whatever its size, since the limits are exclusive, and the cap keeps
-  // the reservation counters from overflowing.
-  const int64_t reservedOps = invalidProposal ? 0 : std::min(ops, budget.ops);
-  const int64_t reservedBytes =
-      invalidProposal ? 0 : std::min(bytes, budget.bytes);
   {
     std::lock_guard<simple_mutexlock> lock(admissionLock_);
-    if (invalidProposal) {
-      health.status = DatalossBoundStatus::Violation;
-      health.reason = DatalossBoundReason::InternalError;
-    } else {
-      health = evaluateUnlocked(config, reservedOps, reservedBytes);
-    }
-
+    health = evaluateUnlocked(config, ops, bytes);
+    decision = decide(config, health);
     if (health.reason == DatalossBoundReason::NotLeader) {
       return decision;
     }
 
-    decision.reason = health.reason;
-    decision.admitted =
-        !(config.failClosed && health.status == DatalossBoundStatus::Violation);
     // A write the budget cannot hold is refused at any lag, so its refusal
     // says nothing about the lag.
-    if (isLimitReason(health.reason) &&
-        fitsAnEmptyBudget(budget, reservedOps, reservedBytes)) {
+    if (isLimitReason(health.reason) && fitsAnEmptyBudget(budget, ops, bytes)) {
       lastRefusal_ = MonoTime::Now();
-      lastRefusalOps_ = reservedOps;
-      lastRefusalBytes_ = reservedBytes;
+      lastRefusalOps_ = ops;
+      lastRefusalBytes_ = bytes;
     }
-    if (decision.admitted && !invalidProposal) {
-      reservedOps_.fetch_add(reservedOps, std::memory_order_relaxed);
-      reservedBytes_.fetch_add(reservedBytes, std::memory_order_relaxed);
+    // FAIL_OPEN admits a negative proposal as an InternalError; there is
+    // nothing to reserve for it.
+    if (decision.admitted && ops >= 0 && bytes >= 0) {
+      // The server saturates its size estimate at INT64_MAX. Reserving at most
+      // the budget keeps the counters from wrapping, and changes no decision:
+      // a write at or past the budget is refused at any lag.
+      const int64_t heldOps = std::min(ops, budget.ops);
+      const int64_t heldBytes = std::min(bytes, budget.bytes);
+      reservedOps_.fetch_add(heldOps, std::memory_order_relaxed);
+      reservedBytes_.fetch_add(heldBytes, std::memory_order_relaxed);
       decision.reserved = true;
-      decision.reservedOps = reservedOps;
-      decision.reservedBytes = reservedBytes;
+      decision.reservedOps = heldOps;
+      decision.reservedBytes = heldBytes;
       decision.reservationOwner = reservationOwner_;
     }
   }
@@ -543,6 +549,14 @@ DatalossBoundGuard::admit(const Config& config, int64_t ops, int64_t bytes) {
   STATS_datalossBoundDecisions.add(
       1, kStatsTag, outcome, datalossBoundReasonName(decision.reason));
   return decision;
+}
+
+AdmissionDecision DatalossBoundGuard::probe(
+    const Config& config,
+    int64_t ops,
+    int64_t bytes) const {
+  std::lock_guard<simple_mutexlock> lock(admissionLock_);
+  return decide(config, evaluateUnlocked(config, ops, bytes));
 }
 
 void DatalossBoundGuard::release(const AdmissionDecision& reservation) {

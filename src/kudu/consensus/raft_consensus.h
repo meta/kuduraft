@@ -824,6 +824,12 @@ class RaftConsensus : public std::enable_shared_from_this<RaftConsensus>,
   [[nodiscard]] AdmissionDecision admitProtectedWrite(
       int64_t ops,
       int64_t bytes);
+
+  // See PeerMessageQueue::probeProtectedWrite. Does not take lock_ either.
+  [[nodiscard]] AdmissionDecision probeProtectedWrite(
+      int64_t ops,
+      int64_t bytes);
+
   void releaseProtectedWriteReservation(const AdmissionDecision& reservation);
 
   [[nodiscard]] DatalossBoundHealth getDatalossBoundHealth();
