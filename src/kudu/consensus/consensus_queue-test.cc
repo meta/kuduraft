@@ -3247,7 +3247,7 @@ TEST_F(
   EXPECT_EQ(readCounter(counter), kDatalossBoundFailClosed);
 }
 
-// A peer exactly at the usable limit is a violation; one entry or byte under
+// A peer exactly at the total budget is a violation; one entry or byte under
 // it qualifies.
 TEST_F(ConsensusQueueBoundedDatalossTest, TestLimitsAreExclusive) {
   FLAGS_dataloss_bound_margin_percent = 0;
@@ -3277,16 +3277,16 @@ TEST_F(ConsensusQueueBoundedDatalossTest, TestLimitsAreExclusive) {
 }
 
 // The margin is held inside the advertised limit, so a peer sitting between
-// the usable budget and the headline number must not qualify. Otherwise the
+// the total budget and the headline number must not qualify. Otherwise the
 // margin buys nothing.
-TEST_F(ConsensusQueueBoundedDatalossTest, TestMarginShrinksTheUsableBudget) {
+TEST_F(ConsensusQueueBoundedDatalossTest, TestMarginShrinksTheTotalBudget) {
   FLAGS_dataloss_bound_margin_percent = 50;
   FLAGS_dataloss_bound_max_ops = 20;
   FLAGS_dataloss_bound_max_bytes = 1000000000;
   setupLeader({makeDbVoter("peer-1", "b")});
   establishWatermark("peer-1", opIdAt(kSetupOps));
 
-  // 15 is under the advertised 20 but over the usable 10.
+  // 15 is under the advertised 20 but over the total budget of 10.
   appendWritesWithPayload(kSetupOps + 1, 15, 8);
 
   const auto health = queue_->getDatalossBoundHealth();
@@ -3405,7 +3405,7 @@ TEST_F(
 }
 
 // The sysvars accept up to LLONG_MAX. Computing the margin as limit * pct
-// overflows there and yields a nonsensical usable budget.
+// overflows there and yields a nonsensical total budget.
 TEST_F(ConsensusQueueBoundedDatalossTest, TestMarginDoesNotOverflowAtMaxLimit) {
   FLAGS_dataloss_bound_max_ops = std::numeric_limits<int64_t>::max();
   FLAGS_dataloss_bound_max_bytes = std::numeric_limits<int64_t>::max();
@@ -3684,7 +3684,7 @@ TEST_F(ConsensusQueueAdmissionTest, TestRejectsPastByteLimit) {
   EXPECT_EQ(health.reason, DatalossBoundReason::ByteLimit);
 }
 
-// R5: a single write larger than the usable byte budget can never be inside
+// R5: a single write larger than the total byte budget can never be inside
 // the bound, so it is refused on its own rather than admitted and counted.
 TEST_F(ConsensusQueueAdmissionTest, TestRejectsOversizedSingleWrite) {
   FLAGS_dataloss_bound_mode = kDatalossBoundFailClosed;

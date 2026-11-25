@@ -91,12 +91,8 @@ TEST(DatalossBoundGuardTest, GatesComeBeforeTheLag) {
   guard.becomeFollower();
   EXPECT_EQ(reasonOf(guard), DatalossBoundReason::NotLeader);
 
-  const auto leader = remoteBehind(1, 1);
-  Config noBudget = failOpen();
-  noBudget.maxOps = 0;
   EXPECT_EQ(
-      leader->health(noBudget).reason, DatalossBoundReason::InternalError);
-  EXPECT_EQ(leader->health(failOpen()).status, DatalossBoundStatus::Ok);
+      remoteBehind(1, 1)->health(failOpen()).status, DatalossBoundStatus::Ok);
 }
 
 // Recorded byte counts stop describing the log on a role change, a
@@ -397,34 +393,31 @@ TEST(DatalossBoundGuardTest, LimitsAreExclusive) {
       reasonOf(*remoteBehind(200, 20000)), DatalossBoundReason::ByteLimit);
 }
 
-TEST(DatalossBoundGuardTest, MarginShrinksTheUsableBudget) {
+TEST(DatalossBoundGuardTest, MarginShrinksTheTotalBudget) {
   Config halved = failOpen();
   halved.marginPercent = 50;
   EXPECT_EQ(
       remoteBehind(60, 0)->health(halved).reason, DatalossBoundReason::OpLimit);
 
   const auto opsAfterMargin = [](int64_t maxOps, int32_t marginPercent) {
-    return DatalossBoundGuard::usableBudget(
+    return DatalossBoundGuard::totalBudget(
                Config{
                    .maxOps = maxOps,
                    .maxBytes = 1,
                    .marginPercent = marginPercent})
-        ->ops;
+        .ops;
   };
   EXPECT_EQ(opsAfterMargin(100, 5), 95);
   EXPECT_EQ(opsAfterMargin(100, -1), 100);
   EXPECT_EQ(opsAfterMargin(100, 150), 1);
   EXPECT_EQ(opsAfterMargin(kMax, 5), kMax - kMax / 100 * 5);
-  EXPECT_FALSE(DatalossBoundGuard::usableBudget(Config{.maxOps = 1}));
+  EXPECT_EQ(opsAfterMargin(0, 5), 1);
 }
 
 TEST(DatalossBoundGuardTest, QualifyingMeansWithinBothLimits) {
   EXPECT_EQ(remoteBehind(99, 9999)->health(failOpen()).qualifyingRemotes, 1);
   EXPECT_EQ(remoteBehind(100, 0)->health(failOpen()).qualifyingRemotes, 0);
   EXPECT_EQ(remoteBehind(0, 10000)->health(failOpen()).qualifyingRemotes, 0);
-  Config noBudget = failOpen();
-  noBudget.maxBytes = 0;
-  EXPECT_EQ(remoteBehind(0, 0)->health(noBudget).qualifyingRemotes, 0);
 
   // Reserved writes count as already appended.
   const auto guard = remoteBehind(99, 0);

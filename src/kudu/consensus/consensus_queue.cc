@@ -249,7 +249,7 @@ DEFINE_int32(
     "Percentage of each limit held back as a safety margin, covering "
     "entries that do not pass through admission, byte-estimation error, and "
     "byte undercount after rebuilding a watermark. The margin is inside the "
-    "advertised limit, so the usable budget is smaller than the number quoted "
+    "advertised limit, so the total budget is smaller than the number quoted "
     "to an IMOC.");
 TAG_FLAG(dataloss_bound_margin_percent, experimental);
 
@@ -1258,15 +1258,12 @@ bool PeerMessageQueue::reconstructMissingWatermark() {
   }
 
   const auto config = datalossBoundConfig();
-  const auto budget = DatalossBoundGuard::usableBudget(config);
-  if (!budget.has_value()) {
-    return false;
-  }
+  const auto budget = DatalossBoundGuard::totalBudget(config);
   const int64_t maxScanBudgetMultiplier = config.failClosed ? 1 : 10;
-  const int64_t maxReconstructionOps = budget->ops >
-          std::numeric_limits<int64_t>::max() / maxScanBudgetMultiplier
+  const int64_t maxReconstructionOps =
+      budget.ops > std::numeric_limits<int64_t>::max() / maxScanBudgetMultiplier
       ? std::numeric_limits<int64_t>::max()
-      : budget->ops * maxScanBudgetMultiplier;
+      : budget.ops * maxScanBudgetMultiplier;
 
   // Collect the work under the lock, scan without it: the scan walks the log
   // index and takes that index's own spinlock, which the append path also

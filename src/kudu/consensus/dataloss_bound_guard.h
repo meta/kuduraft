@@ -76,12 +76,12 @@ struct DatalossBoundHealth {
   int64_t reservedOps = 0;
   int64_t reservedBytes = 0;
 
-  // Eligible remotes with a confirmed watermark within both usable limits,
+  // Eligible remotes with a confirmed watermark within both total budgets,
   // counting reserved writes. When this is 1, losing that remote leaves no
   // replica inside the bound.
   int64_t qualifyingRemotes = 0;
 
-  // min(remaining ops, remaining bytes) as a fraction of the usable budget.
+  // min(remaining ops, remaining bytes) as a fraction of the total budget.
   // Zero or negative when no remote is within the limits: how far past them
   // the best remote is.
   double headroomFraction = 0.0;
@@ -153,8 +153,9 @@ class DatalossBoundGuard {
     int32_t refusalHoldMs = 0;
   };
 
-  // The limits less the configured margin.
-  struct UsableBudget {
+  // The limits less the configured margin, before any lag or reservation is
+  // subtracted.
+  struct TotalBudget {
     int64_t ops = 0;
     int64_t bytes = 0;
   };
@@ -179,9 +180,8 @@ class DatalossBoundGuard {
     int64_t index = 0;
   };
 
-  // The usable budget, or nullopt if the margin leaves none.
-  [[nodiscard]] static std::optional<UsableBudget> usableBudget(
-      const Config& config);
+  // At least 1 in each dimension: a limit at or below zero allows no lag.
+  [[nodiscard]] static TotalBudget totalBudget(const Config& config);
 
   DatalossBoundGuard();
 

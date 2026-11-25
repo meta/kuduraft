@@ -38,10 +38,10 @@ int64_t limitAfterMargin(int64_t limit, int32_t marginPercent) {
 // nothing lagging. The limits are exclusive, so a write that does not is
 // refused at any lag.
 bool fitsAnEmptyBudget(
-    const std::optional<DatalossBoundGuard::UsableBudget>& budget,
+    const DatalossBoundGuard::TotalBudget& budget,
     int64_t ops,
     int64_t bytes) {
-  return budget.has_value() && ops < budget->ops && bytes < budget->bytes;
+  return ops < budget.ops && bytes < budget.bytes;
 }
 
 bool isLimitReason(DatalossBoundReason reason) {
@@ -82,17 +82,15 @@ const char* datalossBoundReasonName(DatalossBoundReason r) {
   return "unknown";
 }
 
-std::optional<DatalossBoundGuard::UsableBudget>
-DatalossBoundGuard::usableBudget(const Config& config) {
+DatalossBoundGuard::TotalBudget DatalossBoundGuard::totalBudget(
+    const Config& config) {
   // Margins are held inside the advertised limits, so the budget a remote may
   // actually consume is smaller than the number quoted externally.
-  const UsableBudget budget{
-      .ops = limitAfterMargin(config.maxOps, config.marginPercent),
-      .bytes = limitAfterMargin(config.maxBytes, config.marginPercent)};
-  if (budget.ops <= 0 || budget.bytes <= 0) {
-    return std::nullopt;
-  }
-  return budget;
+  return TotalBudget{
+      .ops = limitAfterMargin(
+          std::max<int64_t>(1, config.maxOps), config.marginPercent),
+      .bytes = limitAfterMargin(
+          std::max<int64_t>(1, config.maxBytes), config.marginPercent)};
 }
 
 DatalossBoundGuard::DatalossBoundGuard()
@@ -343,7 +341,7 @@ DatalossBoundHealth DatalossBoundGuard::health(const Config& config) const {
       MonoTime::Now() - lastRefusal_ <
           MonoDelta::FromMilliseconds(config.refusalHoldMs) &&
       fitsAnEmptyBudget(
-          usableBudget(config), lastRefusalOps_, lastRefusalBytes_)) {
+          totalBudget(config), lastRefusalOps_, lastRefusalBytes_)) {
     const auto again =
         evaluateUnlocked(config, lastRefusalOps_, lastRefusalBytes_);
     if (isLimitReason(again.reason)) {
@@ -387,8 +385,8 @@ DatalossBoundHealth DatalossBoundGuard::evaluateUnlocked(
     return health;
   }
 
-  const auto budget = usableBudget(config);
-  if (!budget.has_value() || reservedOps < 0 || reservedBytes < 0) {
+  const auto budget = totalBudget(config);
+  if (reservedOps < 0 || reservedBytes < 0) {
     health.status = DatalossBoundStatus::Violation;
     health.reason = DatalossBoundReason::InternalError;
     return health;
@@ -429,8 +427,8 @@ DatalossBoundHealth DatalossBoundGuard::evaluateUnlocked(
     if (!watermark.has_value()) {
       continue;
     }
-    if (opsLagFrom(watermark->index) < budget->ops &&
-        bytesLagFrom(watermark->bytes) < budget->bytes) {
+    if (opsLagFrom(watermark->index) < budget.ops &&
+        bytesLagFrom(watermark->bytes) < budget.bytes) {
       health.qualifyingRemotes++;
     }
     if (!best.has_value() || watermark->index > best->index) {
@@ -451,7 +449,7 @@ DatalossBoundHealth DatalossBoundGuard::evaluateUnlocked(
     // reason that looks transient.
     if (eligible_.empty()) {
       health.reason = DatalossBoundReason::NoRemote;
-    } else if (health.hasOpsLag && health.bestOpsLag >= budget->ops) {
+    } else if (health.hasOpsLag && health.bestOpsLag >= budget.ops) {
       health.reason = DatalossBoundReason::OpLimit;
     } else {
       health.reason = DatalossBoundReason::LeaderBootstrap;
@@ -461,10 +459,10 @@ DatalossBoundHealth DatalossBoundGuard::evaluateUnlocked(
 
   const int64_t bestOps = opsLagFrom(best->index);
   const int64_t bestBytes = bytesLagFrom(best->bytes);
-  const double opsHeadroom = static_cast<double>(budget->ops - bestOps) /
-      static_cast<double>(budget->ops);
-  const double byteHeadroom = static_cast<double>(budget->bytes - bestBytes) /
-      static_cast<double>(budget->bytes);
+  const double opsHeadroom = static_cast<double>(budget.ops - bestOps) /
+      static_cast<double>(budget.ops);
+  const double byteHeadroom = static_cast<double>(budget.bytes - bestBytes) /
+      static_cast<double>(budget.bytes);
 
   health.hasOpsLag = true;
   health.hasWatermark = true;
@@ -472,7 +470,7 @@ DatalossBoundHealth DatalossBoundGuard::evaluateUnlocked(
   health.bestBytesLag = bestBytes;
   health.headroomFraction = std::min(opsHeadroom, byteHeadroom);
 
-  if (bestOps < budget->ops && bestBytes < budget->bytes) {
+  if (bestOps < budget.ops && bestBytes < budget.bytes) {
     health.status = DatalossBoundStatus::Ok;
     health.reason = DatalossBoundReason::None;
     return health;
@@ -481,8 +479,8 @@ DatalossBoundHealth DatalossBoundGuard::evaluateUnlocked(
   health.status = DatalossBoundStatus::Violation;
   // Report whichever dimension the best remote ran out of first. When both
   // are exhausted, bytes is the more actionable number to show an operator.
-  health.reason = bestBytes >= budget->bytes ? DatalossBoundReason::ByteLimit
-                                             : DatalossBoundReason::OpLimit;
+  health.reason = bestBytes >= budget.bytes ? DatalossBoundReason::ByteLimit
+                                            : DatalossBoundReason::OpLimit;
   return health;
 }
 
@@ -490,16 +488,14 @@ AdmissionDecision
 DatalossBoundGuard::admit(const Config& config, int64_t ops, int64_t bytes) {
   AdmissionDecision decision;
   DatalossBoundHealth health;
-  const auto budget = usableBudget(config);
+  const auto budget = totalBudget(config);
   const bool invalidProposal = ops < 0 || bytes < 0;
   // Reserve at most the budget. A write at or past it is a violation
   // whatever its size, since the limits are exclusive, and the cap keeps
   // the reservation counters from overflowing.
-  const int64_t reservedOps =
-      budget.has_value() && !invalidProposal ? std::min(ops, budget->ops) : 0;
-  const int64_t reservedBytes = budget.has_value() && !invalidProposal
-      ? std::min(bytes, budget->bytes)
-      : 0;
+  const int64_t reservedOps = invalidProposal ? 0 : std::min(ops, budget.ops);
+  const int64_t reservedBytes =
+      invalidProposal ? 0 : std::min(bytes, budget.bytes);
   {
     std::lock_guard<simple_mutexlock> lock(admissionLock_);
     if (invalidProposal) {
