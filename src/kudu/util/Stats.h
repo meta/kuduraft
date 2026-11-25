@@ -79,9 +79,15 @@ DECLARE_dynamic_quantile_stat(datalossBoundBootstrapMs, 1);
 DECLARE_dynamic_timeseries(datalossBoundReconstructFailures, 1);
 DECLARE_dynamic_quantile_stat(datalossBoundQualifyingPeers, 1);
 // One per admission decision. The outcome tag is admitted, would_reject,
-// rejected, or release_mismatch; the second tag gives the reason.
+// rejected, would_reject_at_start, rejected_at_start, or release_mismatch; the
+// second tag gives the reason.
 // would_reject is a configured FAIL_OPEN ring reporting what a FAIL_CLOSED one
 // would have refused, which is how the limits get sized before they bind.
+// The _at_start outcomes are the check a statement such as table DDL makes
+// before it starts. A statement refused there logs nothing, so its commit is
+// not checked. Under FAIL_OPEN the statement runs and can be counted again at
+// commit, so add the _at_start and commit-time outcomes only to count checks,
+// not statements.
 // release_mismatch / internal_error means an old queue's reservation was
 // released to its replacement after an in-process Raft restart. It is
 // diagnostic, not an admission decision.
