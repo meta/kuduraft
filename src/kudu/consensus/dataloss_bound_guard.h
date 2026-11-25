@@ -239,9 +239,10 @@ class DatalossBoundGuard {
       const std::vector<std::string>& memberUuids);
 
   // Applies a reply from remote 'uuid' whose last entry is at
-  // 'lastReceivedIndex' and matched this leader's log as 'match'. Only a reply
-  // that accepted the request ('accepted') moves the confirmed position
-  // forward or advances a watermark.
+  // 'lastReceivedIndex' and matched this leader's log as 'match'. A Mismatch or
+  // Unavailable reply forgets the remote. Only a reply that accepted the
+  // request ('accepted') moves the confirmed position forward or advances a
+  // watermark.
   void onPeerResponse(
       const std::string& uuid,
       LogMatchResult match,

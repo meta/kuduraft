@@ -192,26 +192,13 @@ void DatalossBoundGuard::onPeerResponse(
   if (role_ != Role::Leader) {
     return;
   }
-  if (match == LogMatchResult::Mismatch) {
+  // An Unavailable reply ends at an index this log no longer holds, so it
+  // cannot be checked: the remote may hold a different entry there, or below
+  // its confirmed position. Such a remote is also behind this log's retention
+  // and cannot catch up from it.
+  if (match == LogMatchResult::Mismatch ||
+      match == LogMatchResult::Unavailable) {
     evidence_.erase(uuid);
-    return;
-  }
-
-  if (match == LogMatchResult::Unavailable) {
-    // The leader no longer retains this index, so the reply cannot establish
-    // a new prefix. It can still show that the remote no longer reaches a
-    // position it had previously confirmed.
-    const auto it = evidence_.find(uuid);
-    if (it == evidence_.end() ||
-        lastReceivedIndex >= it->second.confirmedPrefixIndex) {
-      return;
-    }
-    const auto& watermark = it->second.confirmedWatermark;
-    if (watermark.has_value() && watermark->index <= lastReceivedIndex) {
-      it->second.confirmedPrefixIndex = watermark->index;
-    } else {
-      evidence_.erase(it);
-    }
     return;
   }
 

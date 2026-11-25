@@ -2623,7 +2623,7 @@ TEST_F(
 
 TEST_F(
     ConsensusQueueBoundedDatalossTest,
-    TestMissingLocalIndexPreservesConfirmedWatermark) {
+    TestMissingLocalIndexForgetsTheRemote) {
   setupLeader({makeDbVoter("peer-1", "b")});
   establishWatermark("peer-1", opIdAt(kSetupOps));
 
@@ -2632,15 +2632,16 @@ TEST_F(
   log->forgetOpIdsThroughForTests(kSetupOps);
   appendWritesWithPayload(kSetupOps + 1, 1, 8);
 
+  // The leader cannot check this reply against its log.
   ackFrom("peer-1", opIdAt(kSetupOps));
+  EXPECT_FALSE(queue_->datalossBoundEvidenceForTests("peer-1").has_value());
+  EXPECT_FALSE(queue_->getDatalossBoundHealth().hasWatermark);
 
-  const auto peer = evidence("peer-1");
-  ASSERT_TRUE(peer.confirmedWatermark.has_value());
-  EXPECT_EQ(peer.confirmedWatermark->index, kSetupOps);
-  EXPECT_EQ(peer.confirmedPrefixIndex, kSetupOps);
+  // Replies that end at an entry the leader holds confirm a position again.
+  establishWatermark("peer-1", opIdAt(kSetupOps + 1));
   const auto health = queue_->getDatalossBoundHealth();
   ASSERT_TRUE(health.hasWatermark);
-  EXPECT_EQ(health.bestOpsLag, 1);
+  EXPECT_EQ(health.bestOpsLag, 0);
 }
 
 TEST_F(

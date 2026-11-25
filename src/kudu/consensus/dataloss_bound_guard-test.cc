@@ -172,24 +172,19 @@ TEST(DatalossBoundGuardTest, OnlyEligibleRemotesCount) {
   EXPECT_FALSE(guard->peerEvidenceForTests("peer-1").has_value());
 }
 
-// A reply the leader cannot check against its log can only take back what the
-// remote had confirmed.
-TEST(DatalossBoundGuardTest, UnavailableReplyKeepsOnlyWhatWasConfirmed) {
-  auto guard = remoteBehind(10, 0);
-  ack(*guard, "peer-1", kTailIndex - 5);
-  ASSERT_EQ(
-      guard->peerEvidenceForTests("peer-1")->confirmedPrefixIndex,
-      kTailIndex - 5);
-
-  guard->onPeerResponse(
-      "peer-1", LogMatchResult::Unavailable, kTailIndex - 7, true);
-  auto evidence = guard->peerEvidenceForTests("peer-1");
-  EXPECT_EQ(evidence->confirmedPrefixIndex, kTailIndex - 10);
-  ASSERT_TRUE(evidence->confirmedWatermark.has_value());
-
-  guard->onPeerResponse(
-      "peer-1", LogMatchResult::Unavailable, kTailIndex - 11, true);
-  EXPECT_FALSE(guard->peerEvidenceForTests("peer-1").has_value());
+// A reply the leader cannot check against its log proves nothing about the
+// remote, whatever index it reports.
+TEST(DatalossBoundGuardTest, UnavailableReplyForgetsTheRemote) {
+  for (const int64_t reported :
+       {kTailIndex - 11, kTailIndex - 10, kTailIndex - 5}) {
+    auto guard = remoteBehind(10, 0);
+    ASSERT_TRUE(guard->health(failOpen()).hasWatermark);
+    guard->onPeerResponse(
+        "peer-1", LogMatchResult::Unavailable, reported, /*accepted=*/true);
+    EXPECT_FALSE(guard->peerEvidenceForTests("peer-1").has_value()) << reported;
+    EXPECT_EQ(reasonOf(*guard), DatalossBoundReason::LeaderBootstrap)
+        << reported;
+  }
 }
 
 // A write that would not fit is refused while the current lag is still within
